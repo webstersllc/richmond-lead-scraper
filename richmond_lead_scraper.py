@@ -18,7 +18,14 @@ SEARCH_TERMS = [
     "recently opened businesses in " + CITY,
     "local startups in " + CITY,
     "new companies in " + CITY,
-    "new restaurants or services in " + CITY
+    "new restaurants or services in " + CITY,
+    "gyms in " + CITY,
+    "coffee shops in " + CITY,
+    "boutiques in " + CITY,
+    "marketing agencies in " + CITY,
+    "salons in " + CITY,
+    "HVAC companies in " + CITY,
+    "plumbers in " + CITY
 ]
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 
@@ -37,7 +44,7 @@ def search_businesses(term):
         href = link["href"]
         if "http" in href and "google" not in href:
             links.append(href)
-    return list(set(links))[:5]
+    return list(set(links))[:15]
 
 def scrape_business_info(site_url):
     try:
@@ -91,27 +98,38 @@ def add_to_brevo(contact):
 
 # --- Main Script ---
 def main():
-    print("Starting Richmond Business Lead Scraper...")
+    print("🔍 Starting Richmond Business Lead Scraper...")
     leads_df = pd.DataFrame(columns=["Business Name", "Owner Name", "Email", "Phone", "Website"])
+    uploaded_count = 0
+    max_leads = 25
 
     for term in SEARCH_TERMS:
+        if uploaded_count >= max_leads:
+            break
         sites = search_businesses(term)
         for site in sites:
+            if uploaded_count >= max_leads:
+                break
+
             info = scrape_business_info(site)
-            if info:
+            if info and info["emails"]:
                 # Check for duplicates in memory
-                if not any(leads_df["Email"].eq(info["emails"][0] if info["emails"] else "")):
+                if not any(leads_df["Email"].eq(info["emails"][0])):
                     leads_df.loc[len(leads_df)] = [
                         info["business_name"],
                         info["owner_name"],
-                        info["emails"][0] if info["emails"] else "",
+                        info["emails"][0],
                         info["phones"][0] if info["phones"] else "",
                         info["website"]
                     ]
                     add_to_brevo(info)
-                    time.sleep(2)
+                    uploaded_count += 1
+                    print(f"✅ Added {info['emails'][0]} ({uploaded_count}/{max_leads})")
 
-    print("\nDone! All new leads were added to Brevo.")
+                    time.sleep(2)  # small delay to be polite to servers
+
+    print(f"\n🎯 Finished run. Uploaded {uploaded_count} leads to Brevo.")
+
 
 from flask import Flask
 
@@ -123,7 +141,9 @@ def home():
 
 @app.route("/run")
 def run_scraper():
+    print("🚀 /run endpoint triggered — scraper starting...")
     main()
+    print("✅ Scraper completed successfully.")
     return "Scraper completed successfully."
 
 if __name__ == "__main__":
