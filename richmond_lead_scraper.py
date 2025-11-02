@@ -84,7 +84,7 @@ def add_to_brevo(contact):
             "PHONE": contact["phones"][0] if contact["phones"] else "",
             "WEBSITE": contact["website"]
         },
-        "listIds": [2]  # Replace with your actual Brevo list ID
+        "listIds": [3]
     }
     r = requests.post(url, headers=headers, data=json.dumps(data))
     print(f"Added to Brevo: {contact['emails'][0]} ({r.status_code})")
