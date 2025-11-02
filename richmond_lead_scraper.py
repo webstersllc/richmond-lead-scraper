@@ -3,7 +3,7 @@ from bs4 import BeautifulSoup
 from flask import Flask, render_template_string, jsonify
 
 # --------------------------------------------------
-#  CONFIG
+# CONFIG
 # --------------------------------------------------
 BREVO_API_KEY = os.getenv("BREVO_API_KEY")
 if not BREVO_API_KEY:
@@ -11,54 +11,44 @@ if not BREVO_API_KEY:
 
 CITY = "Richmond VA"
 SEARCH_TERMS = [
-    "new small businesses near " + CITY,
-    "recently opened businesses in " + CITY,
-    "local startups in " + CITY,
-    "restaurants in " + CITY,
-    "contractors in " + CITY,
-    "coffee shops in " + CITY,
-    "salons in " + CITY,
-    "HVAC companies in " + CITY,
-    "plumbers in " + CITY,
+    "restaurants",
+    "contractors",
+    "marketing agencies",
+    "coffee shops",
+    "plumbers",
+    "electricians",
+    "salons",
+    "HVAC companies",
+    "real estate agents",
+    "roofing companies"
 ]
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 PHONE_RE = re.compile(r"\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}")
-BAD_DOMAINS = ["yelp", "facebook", "linkedin", "tripadvisor", "bbb.org"]
 
 # --------------------------------------------------
-#  SCRAPER HELPERS
+# SCRAPER HELPERS
 # --------------------------------------------------
+
 def search_links(term, max_links=15):
-    print(f"🔎  Searching Google for: {term}")
-    html = requests.get(f"https://www.google.com/search?q={term}", headers=HEADERS).text
-    soup = BeautifulSoup(html, "html.parser")
+    """Search YellowPages for business listings in the target city"""
+    print(f"📒 Searching YellowPages for: {term}")
+    city_query = CITY.replace(" ", "%20")
+    url = f"https://www.yellowpages.com/search?search_terms={term.replace(' ', '%20')}&geo_location_terms={city_query}"
+    r = requests.get(url, headers=HEADERS, timeout=10)
+    soup = BeautifulSoup(r.text, "html.parser")
     links = []
-    for a in soup.find_all("a", href=True):
+    for a in soup.select("a.business-name[href]"):
         href = a["href"]
-        if href.startswith("http") and "google" not in href and not any(b in href for b in BAD_DOMAINS):
-            links.append(href)
-    return list(dict.fromkeys(links))[:max_links]
-
-
-def scrape_site(url):
-    try:
-        r = requests.get(url, headers=HEADERS, timeout=8)
-        text = BeautifulSoup(r.text, "html.parser").get_text(" ", strip=True)
-        emails = list(set(re.findall(EMAIL_RE, text)))
-        if not emails:
-            # Try contact pages if no direct email found
-            emails = find_contact_page(url)
-        phones = list(set(re.findall(PHONE_RE, text)))
-        title = BeautifulSoup(r.text, "html.parser").title
-        biz = title.string.strip() if title else "Unknown Business"
-        return {"business_name": biz, "emails": emails, "phones": phones, "website": url}
-    except Exception as e:
-        print(f"❌ Error scraping {url}: {e}")
-        return None
+        if href.startswith("/"):
+            href = "https://www.yellowpages.com" + href
+        links.append(href)
+    print(f"Found {len(links)} listings for {term}")
+    return links[:max_links]
 
 
 def find_contact_page(domain):
+    """Try to find contact or about page for extra email addresses"""
     possible = ["/contact", "/contact-us", "/about", "/about-us"]
     found = []
     for path in possible:
@@ -72,7 +62,43 @@ def find_contact_page(domain):
     return list(set(found))
 
 
+def scrape_yellowpages_listing(url):
+    """Scrape an individual YellowPages listing for business info"""
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=8)
+        soup = BeautifulSoup(r.text, "html.parser")
+
+        name = soup.select_one("h1.business-name")
+        name = name.get_text(strip=True) if name else "Unknown Business"
+
+        phone = soup.select_one("p.phone")
+        phone = phone.get_text(strip=True) if phone else ""
+
+        text = soup.get_text(" ", strip=True)
+        emails = list(set(re.findall(EMAIL_RE, text)))
+
+        # Try contact/about pages if no email found
+        if not emails:
+            emails = find_contact_page(url)
+
+        website = ""
+        link_tag = soup.select_one("a.primary-btn")
+        if link_tag and link_tag.get("href", "").startswith("http"):
+            website = link_tag["href"]
+
+        return {
+            "business_name": name,
+            "emails": emails,
+            "phones": [phone] if phone else [],
+            "website": website or url,
+        }
+    except Exception as e:
+        print(f"❌ Error scraping {url}: {e}")
+        return None
+
+
 def add_to_brevo(contact):
+    """Send collected lead to Brevo via API"""
     if not contact["emails"]:
         return
     url = "https://api.brevo.com/v3/contacts"
@@ -91,12 +117,13 @@ def add_to_brevo(contact):
         "listIds": [3],
     }
     r = requests.post(url, headers=headers, data=json.dumps(data))
-    print(f"📬  Sent to Brevo: {contact['emails'][0]} ({r.status_code})")
+    print(f"📬 Sent to Brevo: {contact['emails'][0]} ({r.status_code})")
 
 
 # --------------------------------------------------
-#  MAIN SCRAPER
+# MAIN SCRAPER LOGIC
 # --------------------------------------------------
+
 def run_scraper_process(max_leads=25):
     print("🚀 Starting Lead Scraper Run")
     leads = set()
@@ -105,16 +132,20 @@ def run_scraper_process(max_leads=25):
     for term in SEARCH_TERMS:
         if uploaded >= max_leads:
             break
-        sites = search_links(term)
-        for site in sites:
+
+        listings = search_links(term)
+        for listing in listings:
             if uploaded >= max_leads:
                 break
-            info = scrape_site(site)
+
+            info = scrape_yellowpages_listing(listing)
             if not info or not info["emails"]:
                 continue
+
             email = info["emails"][0].lower()
             if email in leads:
                 continue
+
             leads.add(email)
             add_to_brevo(info)
             uploaded += 1
@@ -126,14 +157,14 @@ def run_scraper_process(max_leads=25):
 
 
 # --------------------------------------------------
-#  FLASK APP
+# FLASK APP FRONTEND
 # --------------------------------------------------
+
 app = Flask(__name__)
 last_run_count = 0
 
 @app.route("/")
 def home():
-    # Simple HTML page with button + counter
     html = f"""
     <!doctype html>
     <html>
