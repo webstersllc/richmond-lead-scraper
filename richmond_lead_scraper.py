@@ -127,7 +127,7 @@ def run_scraper():
     return "Scraper completed successfully."
 
 if __name__ == "__main__":
-        test_contact = {
+    test_contact = {
         "emails": ["testlead@example.com"],
         "owner_name": "Test Lead",
         "business_name": "Sample Business",
@@ -136,6 +136,8 @@ if __name__ == "__main__":
     }
     add_to_brevo(test_contact)
     print("✅ Test contact sent to Brevo.")
+
     app.run(host="0.0.0.0", port=10000)
+
 
 
