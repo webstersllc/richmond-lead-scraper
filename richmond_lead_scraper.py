@@ -82,36 +82,61 @@ def find_owner_name_and_phone(website):
         return "", ""
 
 # --------------------------------------------------------------------
-# Core: Get Businesses from Google
+# Core: Get Businesses from Google (multi-area expansion)
 # --------------------------------------------------------------------
-def get_businesses_from_google(location="Richmond,VA", radius_meters=5000, limit=25):
-    log_message(f"Searching businesses near {location}...")
-    url = (
-        f"https://maps.googleapis.com/maps/api/place/textsearch/json?"
-        f"query=businesses+in+{location}&radius={radius_meters}&key={GOOGLE_API_KEY}"
-    )
-    resp = requests.get(url)
-    data = resp.json()
-    if "results" not in data:
-        log_message("No results from Google Places.")
-        return []
+def get_businesses_from_google(limit_per_area=25):
+    locations = [
+        "Richmond,VA",
+        "Henrico,VA",
+        "Hanover,VA",
+        "Chesterfield,VA",
+        "Ashland,VA",
+        "Mechanicsville,VA",
+        "Glen Allen,VA",
+        "Short Pump,VA",
+        "Midlothian,VA",
+        "Powhatan,VA"
+    ]
 
-    businesses = []
-    for result in data["results"][:limit]:
-        name = result.get("name", "")
-        place_id = result.get("place_id")
-        details_url = (
-            f"https://maps.googleapis.com/maps/api/place/details/json?"
-            f"place_id={place_id}&fields=name,website,formatted_phone_number&key={GOOGLE_API_KEY}"
+    all_results = []
+    for loc in locations:
+        log_message(f"📍 Searching businesses near {loc}...")
+        url = (
+            f"https://maps.googleapis.com/maps/api/place/textsearch/json?"
+            f"query=businesses+in+{loc}&key={GOOGLE_API_KEY}"
         )
-        det = requests.get(details_url).json().get("result", {})
-        businesses.append({
-            "name": name,
-            "website": det.get("website", ""),
-            "phone": det.get("formatted_phone_number", ""),
-        })
-    log_message(f"Found {len(businesses)} businesses from Google.")
-    return businesses
+        resp = requests.get(url)
+        data = resp.json()
+
+        if "results" not in data or not data["results"]:
+            log_message(f"⚠️ No results for {loc}")
+            continue
+
+        for result in data["results"][:limit_per_area]:
+            name = result.get("name", "")
+            place_id = result.get("place_id")
+
+            details_url = (
+                f"https://maps.googleapis.com/maps/api/place/details/json?"
+                f"place_id={place_id}&fields=name,website,formatted_phone_number&key={GOOGLE_API_KEY}"
+            )
+            det = requests.get(details_url).json().get("result", {})
+
+            website = det.get("website", "")
+            phone = det.get("formatted_phone_number", "")
+
+            if not website or website in seen_sites:
+                continue
+
+            all_results.append({
+                "name": name,
+                "website": website,
+                "phone": phone
+            })
+        time.sleep(2)
+
+    log_message(f"🌎 Total businesses collected: {len(all_results)}")
+    return all_results
 
 # --------------------------------------------------------------------
 # Helper: Find Email on Website
@@ -199,7 +224,7 @@ def run_scraper_process():
     log_message(f"🎯 Scraper finished — {uploaded} new contacts uploaded, {skipped} duplicates skipped, {len(seen_emails)} total unique emails stored.")
 
 # --------------------------------------------------------------------
-# Routes + Interface
+# Routes + Interface (unchanged)
 # --------------------------------------------------------------------
 @app.route("/")
 def index():
@@ -210,52 +235,12 @@ def index():
 <meta charset="UTF-8">
 <title>Richmond Lead Scraper</title>
 <style>
-  body {
-    background-color: #000;
-    color: #00aaff;
-    font-family: 'Consolas', monospace;
-    text-align: center;
-    padding: 30px;
-  }
-  h1 {
-    font-size: 2.4em;
-    color: #00bfff;
-    margin-bottom: 10px;
-  }
-  h2 {
-    font-size: 1.2em;
-    color: #0099ff;
-  }
-  button {
-    background-color: #00bfff;
-    border: none;
-    padding: 14px 28px;
-    font-size: 16px;
-    font-weight: bold;
-    color: #000;
-    cursor: pointer;
-    border-radius: 6px;
-    box-shadow: 0 0 10px #00bfff;
-    transition: background-color 0.3s, transform 0.2s;
-  }
-  button:hover {
-    background-color: #0088cc;
-    transform: scale(1.05);
-  }
-  #log-box {
-    margin-top: 30px;
-    width: 90%;
-    max-width: 800px;
-    margin-left: auto;
-    margin-right: auto;
-    background: #0a0a0a;
-    border: 1px solid #00bfff;
-    padding: 20px;
-    text-align: left;
-    height: 400px;
-    overflow-y: auto;
-    border-radius: 10px;
-  }
+  body { background-color: #000; color: #00aaff; font-family: 'Consolas', monospace; text-align: center; padding: 30px; }
+  h1 { font-size: 2.4em; color: #00bfff; margin-bottom: 10px; }
+  h2 { font-size: 1.2em; color: #0099ff; }
+  button { background-color: #00bfff; border: none; padding: 14px 28px; font-size: 16px; font-weight: bold; color: #000; cursor: pointer; border-radius: 6px; box-shadow: 0 0 10px #00bfff; transition: background-color 0.3s, transform 0.2s; }
+  button:hover { background-color: #0088cc; transform: scale(1.05); }
+  #log-box { margin-top: 30px; width: 90%; max-width: 800px; margin-left: auto; margin-right: auto; background: #0a0a0a; border: 1px solid #00bfff; padding: 20px; text-align: left; height: 400px; overflow-y: auto; border-radius: 10px; }
   .log-entry { margin: 4px 0; }
 </style>
 </head>
@@ -296,9 +281,6 @@ def run_scraper():
 def get_logs():
     return jsonify({"logs": scraper_logs})
 
-# --------------------------------------------------------------------
-# Run App
-# --------------------------------------------------------------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
 
