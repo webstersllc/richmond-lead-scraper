@@ -21,9 +21,8 @@ if not GOOGLE_API_KEY or not BREVO_API_KEY:
 # --------------------------------------------------------------------
 app = Flask(__name__)
 scraper_logs = []  # Stores log messages for the UI
-seen_emails = set()  # Avoid duplicates
 
-# Store uploaded emails to avoid duplicates across runs
+# Persistent duplicate tracking
 UPLOADED_FILE = "uploaded_leads.json"
 if os.path.exists(UPLOADED_FILE):
     with open(UPLOADED_FILE, "r") as f:
@@ -164,14 +163,9 @@ def add_to_brevo(contact):
 def run_scraper_process():
     scraper_logs.clear()
     log_message("🚀 Starting lead scraper...")
-    add_to_brevo(contact)
-seen_emails.add(email)
-uploaded += 1
-with open(UPLOADED_FILE, "w") as f:
-    json.dump(list(seen_emails), f)
-
     businesses = get_businesses_from_google()
     uploaded = 0
+    skipped = 0
 
     for biz in businesses:
         email = find_email_on_website(biz.get("website"))
@@ -189,14 +183,18 @@ with open(UPLOADED_FILE, "w") as f:
             add_to_brevo(contact)
             seen_emails.add(email)
             uploaded += 1
+            # Persist updated email list
+            with open(UPLOADED_FILE, "w") as f:
+                json.dump(list(seen_emails), f)
             log_message(f"✅ {biz['name']} ({email}) added with owner: {owner_name or 'N/A'}")
         elif email in seen_emails:
+            skipped += 1
             log_message(f"⚠️ Duplicate email skipped: {email}")
         else:
             log_message(f"❌ No email found for {biz['name']}.")
         time.sleep(1.5)
 
-    log_message(f"🎯 Scraper finished — {uploaded} unique contacts uploaded to Brevo.")
+    log_message(f"🎯 Scraper finished — {uploaded} new contacts uploaded, {skipped} duplicates skipped, {len(seen_emails)} total unique emails stored.")
 
 # --------------------------------------------------------------------
 # Routes + Interface
@@ -301,3 +299,4 @@ def get_logs():
 # --------------------------------------------------------------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
+
