@@ -23,6 +23,14 @@ app = Flask(__name__)
 scraper_logs = []  # Stores log messages for the UI
 seen_emails = set()  # Avoid duplicates
 
+# Store uploaded emails to avoid duplicates across runs
+UPLOADED_FILE = "uploaded_leads.json"
+if os.path.exists(UPLOADED_FILE):
+    with open(UPLOADED_FILE, "r") as f:
+        seen_emails = set(json.load(f))
+else:
+    seen_emails = set()
+
 def log_message(message):
     timestamp = datetime.now().strftime("%H:%M:%S")
     entry = f"[{timestamp}] {message}"
@@ -155,8 +163,13 @@ def add_to_brevo(contact):
 # --------------------------------------------------------------------
 def run_scraper_process():
     scraper_logs.clear()
-    seen_emails.clear()
     log_message("🚀 Starting lead scraper...")
+    add_to_brevo(contact)
+seen_emails.add(email)
+uploaded += 1
+with open(UPLOADED_FILE, "w") as f:
+    json.dump(list(seen_emails), f)
+
     businesses = get_businesses_from_google()
     uploaded = 0
 
