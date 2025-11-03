@@ -114,8 +114,7 @@ def add_to_brevo(lead):
     else:
         log(f"❌ Failed to add {email}. See response above.")
 
-# === MAIN SCRAPER ===
-def run_scraper():
+# === MAIN SCRAPER ===def run_scraper():
     log("🚀 Starting lead scraper...")
     all_sites = []
     for term in SEARCH_TERMS:
@@ -124,18 +123,18 @@ def run_scraper():
     log(f"Found {len(all_sites)} businesses from Google.")
 
     uploaded_this_run = 0
-    
-for site in all_sites:
-    if uploaded_this_run >= 20:
-        break  # stop once we have at least 20 valid emails this run
+    for site in all_sites:
+        if uploaded_this_run >= 20:
+            break  # stop once we have at least 20 valid emails this run
 
-    lead = scrape_site(site)
-    if lead and lead["email"]:
-        add_to_brevo(lead)
-        uploaded_this_run += 1
-    time.sleep(1)
+        lead = scrape_site(site)
+        if lead and lead["email"]:
+            add_to_brevo(lead)
+            uploaded_this_run += 1
+        time.sleep(1)
 
-log(f"🎯 Scraper finished — {uploaded_this_run} new contacts uploaded to Brevo this run, {len(uploaded_leads)} total unique.")
+    log(f"🎯 Scraper finished — {uploaded_this_run} new contacts uploaded to Brevo this run, {len(uploaded_leads)} total unique.")
+
 
 
 # === WEB INTERFACE ===
