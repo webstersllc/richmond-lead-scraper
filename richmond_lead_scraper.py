@@ -123,13 +123,20 @@ def run_scraper():
     all_sites = list(set(all_sites))
     log(f"Found {len(all_sites)} businesses from Google.")
 
-    for site in all_sites:
-        lead = scrape_site(site)
-        if lead:
-            add_to_brevo(lead)
-        time.sleep(1)
+    uploaded_this_run = 0
+    
+for site in all_sites:
+    if uploaded_this_run >= 20:
+        break  # stop once we have at least 20 valid emails this run
 
-    log(f"🎯 Scraper finished — {len(uploaded_leads)} unique contacts uploaded to Brevo.")
+    lead = scrape_site(site)
+    if lead and lead["email"]:
+        add_to_brevo(lead)
+        uploaded_this_run += 1
+    time.sleep(1)
+
+log(f"🎯 Scraper finished — {uploaded_this_run} new contacts uploaded to Brevo this run, {len(uploaded_leads)} total unique.")
+
 
 # === WEB INTERFACE ===
 app = Flask(__name__)
