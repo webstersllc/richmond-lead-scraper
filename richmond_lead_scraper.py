@@ -22,13 +22,15 @@ if not GOOGLE_API_KEY or not BREVO_API_KEY:
 app = Flask(__name__)
 scraper_logs = []  # Stores log messages for the UI
 
-# Persistent duplicate tracking
+# Persistent duplicate tracking (emails + websites)
 UPLOADED_FILE = "uploaded_leads.json"
 if os.path.exists(UPLOADED_FILE):
     with open(UPLOADED_FILE, "r") as f:
-        seen_emails = set(json.load(f))
+        stored = json.load(f)
+        seen_emails = set(stored.get("emails", []))
+        seen_sites = set(stored.get("sites", []))
 else:
-    seen_emails = set()
+    seen_emails, seen_sites = set(), set()
 
 def log_message(message):
     timestamp = datetime.now().strftime("%H:%M:%S")
@@ -50,7 +52,6 @@ def find_owner_name_and_phone(website):
         text = re.sub(r"<[^>]*>", " ", html)
         text = re.sub(r"\s+", " ", text)
 
-        # Try to find an "about" page
         about_link = None
         for link in re.findall(r'href=["\'](.*?)["\']', html):
             if "about" in link.lower():
@@ -63,18 +64,15 @@ def find_owner_name_and_phone(website):
             except:
                 pass
 
-        # Find owner/founder line
         owner_keywords = ["owner", "founder", "ceo", "manager", "director", "president"]
         owner_name = ""
         for line in text.split("."):
             if any(k in line.lower() for k in owner_keywords):
-                # Attempt to capture a name pattern (First Last)
                 name_match = re.search(r"\b([A-Z][a-z]+ [A-Z][a-z]+)\b", line)
                 if name_match:
                     owner_name = name_match.group(1)
                     break
 
-        # Find phone number if not provided
         phone_match = re.search(r"\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}", text)
         phone = phone_match.group(0) if phone_match else ""
 
@@ -169,7 +167,7 @@ def run_scraper_process():
 
     for biz in businesses:
         email = find_email_on_website(biz.get("website"))
-        if email and email not in seen_emails:
+        if email and email not in seen_emails and biz.get("website") not in seen_sites:
             owner_name, phone = find_owner_name_and_phone(biz.get("website"))
             if not phone:
                 phone = biz.get("phone", "")
@@ -182,14 +180,18 @@ def run_scraper_process():
             }
             add_to_brevo(contact)
             seen_emails.add(email)
+            if biz.get("website"):
+                seen_sites.add(biz.get("website"))
             uploaded += 1
-            # Persist updated email list
+
+            # Save updated state
             with open(UPLOADED_FILE, "w") as f:
-                json.dump(list(seen_emails), f)
+                json.dump({"emails": list(seen_emails), "sites": list(seen_sites)}, f)
+
             log_message(f"✅ {biz['name']} ({email}) added with owner: {owner_name or 'N/A'}")
-        elif email in seen_emails:
+        elif email in seen_emails or biz.get("website") in seen_sites:
             skipped += 1
-            log_message(f"⚠️ Duplicate email skipped: {email}")
+            log_message(f"⚠️ Duplicate skipped: {biz['name']} ({email or biz.get('website')})")
         else:
             log_message(f"❌ No email found for {biz['name']}.")
         time.sleep(1.5)
