@@ -1,4 +1,4 @@
-import os, re, json, time, threading
+ import os, re, json, time, threading
 from datetime import datetime
 from urllib.parse import urljoin
 from pathlib import Path
@@ -87,7 +87,9 @@ def add_to_brevo(c, lid=3):
     r = requests.post("https://api.brevo.com/v3/contacts", headers=headers, data=json.dumps(payload))
     log(f"Added {c['email']} to Brevo ({r.status_code})")
 
-def get_businesses_from_google(query, location="Richmond,VA", radius_m=8000, limit=60):
+def get_businesses_from_google(query, location=None, radius_m=8000):
+    if not location:
+        location = "Richmond,VA"  # fallback default if user leaves it blank
     log(f"Searching {query} near {location} ...")
     url = f"https://maps.googleapis.com/maps/api/place/textsearch/json?query={query}+in+{location}&radius={radius_m}&key={GOOGLE_API_KEY}"
     r = requests.get(url).json()
