@@ -29,30 +29,48 @@ def log_message(message):
 def get_businesses_from_google(category, zipcode, radius_miles):
     radius_meters = int(radius_miles) * 1609
     location_query = f"{category} near {zipcode}"
+    log_message(f"🔎 Searching {category} near {zipcode} ({radius_miles} mi radius)...")
+
     url = (
         f"https://maps.googleapis.com/maps/api/place/textsearch/json?"
         f"query={location_query}&radius={radius_meters}&key={GOOGLE_API_KEY}"
     )
-    log_message(f"🔎 Searching {category} near {zipcode} ({radius_miles} mi radius)...")
-    resp = requests.get(url)
-    data = resp.json()
-    results = data.get("results", [])
-    log_message(f"📍 Found {len(results)} {category} results.")
+
     businesses = []
-    for r in results:
-        name = r.get("name", "Unknown Business")
-        place_id = r.get("place_id")
-        details_url = (
-            f"https://maps.googleapis.com/maps/api/place/details/json?"
-            f"place_id={place_id}&fields=name,website,formatted_phone_number&key={GOOGLE_API_KEY}"
-        )
-        det = requests.get(details_url).json().get("result", {})
-        businesses.append({
-            "name": name,
-            "website": det.get("website", ""),
-            "phone": det.get("formatted_phone_number", "")
-        })
-        time.sleep(0.2)
+    fetched = 0
+    next_page_token = None
+
+    for _ in range(3):  # max 3 pages * 20 results = 60
+        if next_page_token:
+            time.sleep(2)  # must wait before using next_page_token
+            url = f"https://maps.googleapis.com/maps/api/place/textsearch/json?pagetoken={next_page_token}&key={GOOGLE_API_KEY}"
+
+        resp = requests.get(url)
+        data = resp.json()
+        results = data.get("results", [])
+        next_page_token = data.get("next_page_token")
+
+        for r in results:
+            name = r.get("name", "Unknown Business")
+            place_id = r.get("place_id")
+            details_url = (
+                f"https://maps.googleapis.com/maps/api/place/details/json?"
+                f"place_id={place_id}&fields=name,website,formatted_phone_number&key={GOOGLE_API_KEY}"
+            )
+            det = requests.get(details_url).json().get("result", {})
+            businesses.append({
+                "name": name,
+                "website": det.get("website", ""),
+                "phone": det.get("formatted_phone_number", "")
+            })
+            fetched += 1
+            if fetched >= 60:
+                break
+
+        if not next_page_token or fetched >= 60:
+            break
+
+    log_message(f"📍 Retrieved {len(businesses)} {category} results total.")
     return businesses
 
 def find_email_on_website(website):
