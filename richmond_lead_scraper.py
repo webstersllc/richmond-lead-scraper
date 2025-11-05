@@ -1,281 +1,292 @@
 import os
 import requests
 import json
-import re
-import pandas as pd
-import zipfile
+from flask import Flask, render_template_string, jsonify, send_file, request
 from datetime import datetime
-from io import BytesIO
-from flask import Flask, render_template_string, jsonify, request, send_file
+import time
+import re
+from urllib.parse import urljoin
+import pandas as pd
+from pathlib import Path
 import threading
-from urllib.parse import urlencode
 
-# ============================================================
-#  CONFIG
-# ============================================================
+# --------------------------------------------------------------------
+# Environment Variables
+# --------------------------------------------------------------------
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 BREVO_API_KEY = os.getenv("BREVO_API_KEY")
+
 if not GOOGLE_API_KEY or not BREVO_API_KEY:
     raise ValueError("Missing environment variables for GOOGLE_API_KEY or BREVO_API_KEY")
 
-SCRAPE_FOLDER = "scrapes"
-os.makedirs(SCRAPE_FOLDER, exist_ok=True)
-
-# ============================================================
-#  APP INITIALIZATION
-# ============================================================
+# --------------------------------------------------------------------
+# Flask App + Log Storage
+# --------------------------------------------------------------------
 app = Flask(__name__)
 scraper_logs = []
 seen_emails = set()
+last_user_export = {"ready": False, "path": "", "name": ""}
 
-# ============================================================
-#  LOGGING
-# ============================================================
-def log(msg):
+def log_message(message):
     timestamp = datetime.now().strftime("%H:%M:%S")
-    entry = f"[{timestamp}] {msg}"
+    entry = f"[{timestamp}] {message}"
     print(entry)
     scraper_logs.append(entry)
     if len(scraper_logs) > 400:
         scraper_logs.pop(0)
 
-# ============================================================
-#  BREVO UPLOAD
-# ============================================================
-def add_to_brevo(contact, list_id):
-    url = "https://api.brevo.com/v3/contacts"
-    headers = {"accept": "application/json", "content-type": "application/json", "api-key": BREVO_API_KEY}
-    data = {
-        "email": contact.get("email", ""),
-        "attributes": {
-            "FIRSTNAME": contact.get("owner_name", contact.get("name", "")),
-            "COMPANY": contact.get("name", ""),
-            "PHONE": contact.get("phone", ""),
-            "WEBSITE": contact.get("website", "")
-        },
-        "listIds": [list_id]
-    }
-    r = requests.post(url, headers=headers, data=json.dumps(data))
-    log(f"📤 Uploaded {contact.get('email','(no email)')} to Brevo list {list_id} ({r.status_code})")
-
-# ============================================================
-#  HELPERS
-# ============================================================
+# --------------------------------------------------------------------
+# Helper: Extract Owner Names & Phone Numbers
+# --------------------------------------------------------------------
 def find_owner_name_and_phone(website):
     if not website:
         return "", ""
     try:
         resp = requests.get(website, timeout=6)
-        text = re.sub(r"<[^>]*>", " ", resp.text)
+        html = resp.text
+        text = re.sub(r"<[^>]*>", " ", html)
         text = re.sub(r"\s+", " ", text)
 
-        owner_keywords = ["owner", "founder", "ceo", "manager", "president", "director"]
+        about_link = None
+        for link in re.findall(r'href=["\'](.*?)["\']', html):
+            if "about" in link.lower():
+                about_link = urljoin(website, link)
+                break
+        if about_link:
+            try:
+                about_resp = requests.get(about_link, timeout=6)
+                text += " " + re.sub(r"<[^>]*>", " ", about_resp.text)
+            except:
+                pass
+
+        owner_keywords = ["owner", "founder", "ceo", "manager", "director", "president"]
         owner_name = ""
         for line in text.split("."):
             if any(k in line.lower() for k in owner_keywords):
-                m = re.search(r"\b([A-Z][a-z]+ [A-Z][a-z]+)\b", line)
-                if m:
-                    owner_name = m.group(1)
+                name_match = re.search(r"\b([A-Z][a-z]+ [A-Z][a-z]+)\b", line)
+                if name_match:
+                    owner_name = name_match.group(1)
                     break
+
         phone_match = re.search(r"\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}", text)
         phone = phone_match.group(0) if phone_match else ""
         return owner_name, phone
-    except Exception:
+    except Exception as e:
+        log_message(f"Error parsing {website}: {e}")
         return "", ""
 
-def find_email_on_website(website):
-    if not website:
-        return ""
-    try:
-        resp = requests.get(website, timeout=6)
-        emails = re.findall(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", resp.text)
-        valid = [e for e in emails if not any(x in e for x in ["example.com","schema.org","wixpress"])]
-        return valid[0] if valid else ""
-    except Exception:
-        return ""
-
-def get_businesses(category, zipcode, radius_miles):
-    log(f"📍 Searching {category} near {zipcode} ({radius_miles} miles)")
-    radius_meters = int(radius_miles * 1609.34)
-    query = f"{category} near {zipcode}"
-    url = f"https://maps.googleapis.com/maps/api/place/textsearch/json?{urlencode({'query':query,'radius':radius_meters,'key':GOOGLE_API_KEY})}"
-    resp = requests.get(url).json()
-    results = resp.get("results", [])
+# --------------------------------------------------------------------
+# Google API Search
+# --------------------------------------------------------------------
+def get_businesses_from_google(location="Richmond,VA", radius_meters=8000, limit=60):
+    log_message(f"Searching businesses near {location}...")
+    url = (
+        f"https://maps.googleapis.com/maps/api/place/textsearch/json?"
+        f"query=businesses+in+{location}&radius={radius_meters}&key={GOOGLE_API_KEY}"
+    )
+    resp = requests.get(url)
+    data = resp.json()
+    if "results" not in data:
+        log_message("No results from Google Places.")
+        return []
     businesses = []
-    for b in results:
-        name = b.get("name")
-        place_id = b.get("place_id")
-        details_url = f"https://maps.googleapis.com/maps/api/place/details/json?place_id={place_id}&fields=name,website,formatted_phone_number&key={GOOGLE_API_KEY}"
+    for result in data["results"][:limit]:
+        name = result.get("name", "")
+        place_id = result.get("place_id")
+        details_url = (
+            f"https://maps.googleapis.com/maps/api/place/details/json?"
+            f"place_id={place_id}&fields=name,website,formatted_phone_number&key={GOOGLE_API_KEY}"
+        )
         det = requests.get(details_url).json().get("result", {})
         businesses.append({
             "name": name,
             "website": det.get("website", ""),
             "phone": det.get("formatted_phone_number", "")
         })
-    log(f"✅ Found {len(businesses)} {category} listings.")
+    log_message(f"Found {len(businesses)} businesses from Google.")
     return businesses
 
-# ============================================================
-#  MAIN SCRAPER PROCESS
-# ============================================================
-def run_scraper(categories, zipcode, radius):
+# --------------------------------------------------------------------
+# Find Email
+# --------------------------------------------------------------------
+def find_email_on_website(website):
+    if not website:
+        return ""
+    try:
+        resp = requests.get(website, timeout=6)
+        emails = re.findall(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", resp.text)
+        for e in emails:
+            if not any(bad in e for bad in ["example.com", "wixpress", "schema.org", "sentry"]):
+                return e
+    except Exception as e:
+        log_message(f"Error scanning {website}: {e}")
+    return ""
+
+# --------------------------------------------------------------------
+# Add to Brevo
+# --------------------------------------------------------------------
+def add_to_brevo(contact, list_id=3):
+    if not contact.get("email"):
+        return
+    url = "https://api.brevo.com/v3/contacts"
+    headers = {
+        "accept": "application/json",
+        "content-type": "application/json",
+        "api-key": BREVO_API_KEY
+    }
+    payload = {
+        "email": contact["email"],
+        "attributes": {
+            "FIRSTNAME": contact.get("owner_name", ""),
+            "COMPANY": contact.get("name", ""),
+            "PHONE": contact.get("phone", ""),
+            "WEBSITE": contact.get("website", "")
+        },
+        "listIds": [list_id]
+    }
+    r = requests.post(url, headers=headers, data=json.dumps(payload))
+    log_message(f"Added {contact['email']} to Brevo ({r.status_code})")
+
+# --------------------------------------------------------------------
+# Scraper Process
+# --------------------------------------------------------------------
+def run_scraper_process(user_mode=False, location="Richmond,VA"):
     scraper_logs.clear()
     seen_emails.clear()
-    log("🚀 Starting scraper...")
-    leads = []
-    for cat in categories:
-        for biz in get_businesses(cat, zipcode, radius):
-            name = biz.get("name", "Unknown Business")
-            website = biz.get("website", "")
+    log_message("🚀 Starting lead scraper...")
+    businesses = get_businesses_from_google(location=location)
+    uploaded = 0
+    collected_rows = []
+
+    for biz in businesses:
+        email = find_email_on_website(biz.get("website"))
+        owner_name, phone = find_owner_name_and_phone(biz.get("website"))
+        if not owner_name:
+            owner_name = biz.get("name", "")
+        if not phone:
             phone = biz.get("phone", "")
-            email = find_email_on_website(website)
-            owner, found_phone = find_owner_name_and_phone(website)
-            phone = phone or found_phone
 
-            contact = {
-                "name": name,
-                "email": email,
-                "phone": phone,
-                "website": website,
-                "owner_name": owner or name,
-                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            }
+        contact = {
+            "name": biz.get("name"),
+            "phone": phone,
+            "website": biz.get("website"),
+            "email": email,
+            "owner_name": owner_name
+        }
 
-            if email and email not in seen_emails:
-                add_to_brevo(contact, 3)
-                uploaded_to = "Brevo List 3 (email)"
-                seen_emails.add(email)
-            elif not email and phone:
-                add_to_brevo(contact, 5)
-                uploaded_to = "Brevo List 5 (phone)"
-            else:
-                uploaded_to = "Skipped (no contact info)"
-            contact["uploaded_to"] = uploaded_to
-            leads.append(contact)
-    save_scrape(leads)
-    log(f"🎯 Scraper finished — {len(leads)} total leads collected.")
+        if email and email not in seen_emails:
+            add_to_brevo(contact, list_id=3)
+            seen_emails.add(email)
+            uploaded += 1
+            log_message(f"✅ {biz['name']} ({email}) added with owner: {owner_name}")
+        elif not email and phone:
+            add_to_brevo(contact, list_id=5)
+            log_message(f"📞 {biz['name']} added to phone-only list (no email).")
+        elif email in seen_emails:
+            log_message(f"⚠️ Duplicate skipped: {email}")
+        else:
+            log_message(f"❌ No contact found for {biz['name']}.")
+        time.sleep(1.5)
 
-# ============================================================
-#  SAVE SCRAPES
-# ============================================================
-def save_scrape(leads):
-    if not leads: return
-    df = pd.DataFrame(leads)
-    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    base = os.path.join(SCRAPE_FOLDER, f"scrape_{timestamp}")
-    xlsx = base + ".xlsx"
-    jsonf = base + ".json"
-    df.to_excel(xlsx, index=False)
-    df.to_json(jsonf, orient="records", indent=2)
-    zipf = base + ".zip"
-    with zipfile.ZipFile(zipf, "w") as z:
-        z.write(xlsx, os.path.basename(xlsx))
-        z.write(jsonf, os.path.basename(jsonf))
-    os.remove(xlsx)
-    os.remove(jsonf)
-    log(f"💾 Saved results to {os.path.basename(zipf)}")
+    # export to Excel
+    Path("data/exports").mkdir(parents=True, exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    fname = f"leads_{location}_{ts}.xlsx"
+    fpath = f"data/exports/{fname}"
+    df = pd.DataFrame(businesses)
+    df.to_excel(fpath, index=False)
+    last_user_export.update({"ready": True, "path": fpath, "name": fname})
+    log_message(f"🎯 Scraper finished — {uploaded} contacts uploaded to Brevo.")
 
-# ============================================================
-#  ROUTES
-# ============================================================
+# --------------------------------------------------------------------
+# HTML Template
+# --------------------------------------------------------------------
+TEMPLATE = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Business Lead Scraper</title>
+<style>
+  body { background-color: #000; color: #00aaff; font-family: 'Consolas', monospace; text-align: center; padding: 30px; }
+  h1 { font-size: 2.4em; color: #00bfff; margin-bottom: 10px; }
+  nav a { color: #00bfff; margin: 0 10px; text-decoration: none; }
+  button { background-color: #00bfff; border: none; padding: 14px 28px; font-size: 16px; font-weight: bold; color: #000; cursor: pointer; border-radius: 6px; box-shadow: 0 0 10px #00bfff; margin: 10px; }
+  #log-box { margin-top: 30px; width: 90%; max-width: 800px; margin-left: auto; margin-right: auto; background: #0a0a0a; border: 1px solid #00bfff; padding: 20px; text-align: left; height: 400px; overflow-y: auto; border-radius: 10px; }
+  .log-entry { margin: 4px 0; }
+</style>
+</head>
+<body>
+  <nav>
+    <a href="/">Home</a> |
+    <a href="/about">About</a> |
+    <a href="/help">Help</a> |
+    <a href="/previous">Previous Runs</a>
+  </nav>
+  <h1>Business Lead Scraper</h1>
+  <h2>Find businesses, owners, phones, and emails — auto-upload to Brevo</h2>
+  <button onclick="startScraper()">Start Scraper</button>
+  <div id="log-box"></div>
+
+<script>
+async function startScraper() {
+  document.getElementById('log-box').innerHTML = "<div class='log-entry'>🚀 Scraper starting...</div>";
+  fetch('/run');
+}
+async function fetchLogs() {
+  const res = await fetch('/logs');
+  const data = await res.json();
+  const logBox = document.getElementById('log-box');
+  logBox.innerHTML = data.logs.map(l => "<div class='log-entry'>" + l + "</div>").join('');
+  logBox.scrollTop = logBox.scrollHeight;
+}
+setInterval(fetchLogs, 2000);
+</script>
+</body>
+</html>
+"""
+
+# --------------------------------------------------------------------
+# Routes
+# --------------------------------------------------------------------
 @app.route("/")
 def index():
-    categories = ["Restaurants", "HVAC Companies", "Landscaping", "Coffee Shops",
-                  "Gyms", "Real Estate", "Boutiques", "Auto Repair", "Salons", "Contractors"]
-    return render_template_string("""
-<!DOCTYPE html><html><head><title>Richmond Lead Scraper</title>
-<style>
-body{background:#000;color:#00bfff;font-family:Consolas;text-align:center;padding:40px;}
-h1{color:#00bfff;margin-bottom:10px;}label{font-size:1.2em;}
-input,select{padding:8px;border-radius:6px;border:none;margin:5px;}
-button{background:#00bfff;color:#000;padding:12px 24px;border:none;
-border-radius:8px;font-weight:bold;cursor:pointer;margin-top:10px;}
-button:hover{background:#0088cc;}
-.category-btn{margin:5px;padding:10px 20px;border:1px solid #00bfff;
-border-radius:6px;cursor:pointer;color:#00bfff;background:none;}
-.category-btn.active{background:#00bfff;color:#000;}
-</style></head><body>
-<h1>Richmond Lead Scraper</h1>
-<label>ZIP Code:</label><input id="zip" placeholder="e.g. 23005">
-<label>Radius (miles):</label><input id="radius" type="number" value="10">
-<div id="categories">
-{% for c in categories %}
-  <button class="category-btn" onclick="toggleCat(this)">{{c}}</button>
-{% endfor %}
-</div>
-<br><button onclick="startScraper()">Start Scraper</button>
-<script>
-let selected=[]
-function toggleCat(btn){
-  let cat=btn.innerText
-  if(selected.includes(cat)){selected=selected.filter(c=>c!=cat);btn.classList.remove("active")}
-  else{selected.push(cat);btn.classList.add("active")}
-}
-function startScraper(){
-  let zip=document.getElementById('zip').value
-  let r=document.getElementById('radius').value
-  if(!zip){alert('Enter ZIP');return}
-  fetch(`/run?zip=${zip}&radius=${r}&categories=${encodeURIComponent(selected.join(','))}`)
-  .then(()=>window.location='/run')
-}
-</script>
-</body></html>""", categories=categories)
+    return render_template_string(TEMPLATE)
+
+@app.route("/about")
+def about():
+    return render_template_string("<h1 style='color:#00bfff;'>About</h1><p>This scraper helps find local business leads and syncs them to Brevo.</p>")
+
+@app.route("/help")
+def help_page():
+    return render_template_string("<h1 style='color:#00bfff;'>Help</h1><p>Press 'Start Scraper' to begin. Logs will appear in real-time. Exports are auto-generated as XLSX files and uploaded to Brevo lists.</p>")
+
+@app.route("/previous")
+def previous_runs():
+    files = Path("data/exports").glob("*.xlsx")
+    links = "".join([f"<p><a style='color:#00bfff;' href='/download/{f.name}'>{f.name}</a></p>" for f in files])
+    return render_template_string(f"<h1 style='color:#00bfff;'>Previous Exports</h1>{links or '<p>No exports yet.</p>'}")
+
+@app.route("/download/<name>")
+def download_file(name):
+    fpath = f"data/exports/{name}"
+    if not os.path.exists(fpath):
+        return jsonify({"error": "Not found"}), 404
+    return send_file(fpath, as_attachment=True)
 
 @app.route("/run")
-def run_page():
-    return render_template_string("""
-<!DOCTYPE html><html><head><title>Scraper Running</title>
-<style>
-body{background:#000;color:#00bfff;font-family:Consolas;text-align:center;padding:30px;}
-#log{background:#0a0a0a;border:1px solid #00bfff;padding:20px;width:90%;
-margin:auto;border-radius:10px;height:400px;overflow-y:auto;}
-button{background:#00bfff;color:#000;padding:10px 20px;border:none;border-radius:6px;
-font-weight:bold;cursor:pointer;margin:10px;}
-</style></head><body>
-<h1>Scraper Logs</h1>
-<button onclick="window.location='/'">Back</button>
-<div id="log"></div>
-<script>
-async function refresh(){let r=await fetch('/logs');let d=await r.json();
-let box=document.getElementById('log');box.innerHTML=d.logs.map(l=>'<div>'+l+'</div>').join('');
-box.scrollTop=box.scrollHeight}
-setInterval(refresh,2000)
-</script></body></html>""")
-
-@app.route("/scrapes")
-def scrapes_page():
-    files=[f for f in os.listdir(SCRAPE_FOLDER) if f.endswith('.zip')]
-    files.sort(reverse=True)
-    links="".join(f"<div><a href='/download/{f}'>{f}</a> "
-                  f"<a href='/delete/{f}' style='color:red'>❌</a></div>" for f in files) or "No saved scrapes yet."
-    return f"<body style='background:#000;color:#00bfff;font-family:Consolas;padding:30px;'>" \
-           f"<h1>Saved Scrapes</h1>{links}<br><a href='/' style='color:#00bfff;'>Back</a></body>"
-
-@app.route("/download/<path:fname>")
-def download(fname):
-    return send_file(os.path.join(SCRAPE_FOLDER, fname), as_attachment=True)
-
-@app.route("/delete/<path:fname>")
-def delete(fname):
-    os.remove(os.path.join(SCRAPE_FOLDER, fname))
-    log(f"🗑 Deleted {fname}")
-    return "<meta http-equiv='refresh' content='0; url=/scrapes'/>"
+def run_scraper():
+    threading.Thread(target=run_scraper_process).start()
+    return jsonify({"status": "Scraper started"})
 
 @app.route("/logs")
-def logs():
+def get_logs():
     return jsonify({"logs": scraper_logs})
 
-@app.route("/run", methods=["GET"])
-def start_scraper():
-    zipc = request.args.get("zip", "23005")
-    radius = float(request.args.get("radius", 10))
-    categories = request.args.get("categories", "Restaurants").split(",")
-    threading.Thread(target=run_scraper, args=(categories, zipc, radius)).start()
-    return jsonify({"status": "started"})
-
-# ============================================================
-#  MAIN
-# ============================================================
+# --------------------------------------------------------------------
+# Run
+# --------------------------------------------------------------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
+
 
