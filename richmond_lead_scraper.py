@@ -197,10 +197,17 @@ def home():
         <button type='submit'>Start Search</button>
     </form>
     <script>
-    function toggleGroup(group){{
-        const div=document.querySelectorAll(`.group:has(h3:contains('${group}')) input[type=checkbox]`);
-        div.forEach(cb=>cb.checked=!cb.checked);
-    }}
+    function toggleGroup(groupName) {
+        const groups = document.querySelectorAll('.group');
+        groups.forEach(div => {
+            const header = div.querySelector('h3');
+            if (header && header.textContent.trim() === groupName) {
+                const checkboxes = div.querySelectorAll('input[type="checkbox"]');
+                const allChecked = Array.from(checkboxes).every(cb => cb.checked);
+                checkboxes.forEach(cb => cb.checked = !allChecked);
+            }
+        });
+    }
     </script>
     """
     return render_template_string(html)
