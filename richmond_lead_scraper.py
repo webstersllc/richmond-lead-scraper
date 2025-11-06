@@ -106,8 +106,26 @@ def run_scraper_process(categories, zipcode, radius):
     seen_emails.clear()
     log_message("🚀 Scraper started.")
     results, uploaded = [], 0
+    start_time = time.time()
+    MAX_RUNTIME = 600      # seconds (10 minutes)
+    MIN_RESULTS = 50       # minimum before early exit
+
     for c in categories:
+        # stop if timeout reached AND minimum already met
+        if time.time() - start_time > MAX_RUNTIME and len(results) >= MIN_RESULTS:
+            log_message(f"⏰ Timeout reached after {len(results)} results — stopping early.")
+            break
+
         results.extend(get_businesses_from_google(c, zipcode, radius))
+
+    # If not enough results, warn user
+    if len(results) < MIN_RESULTS:
+        log_message(f"⚠️ Only {len(results)} results found — continuing until minimum reached.")
+        # Try once more with a few top categories again
+        for c in categories[:3]:
+            results.extend(get_businesses_from_google(c, zipcode, radius))
+            if len(results) >= MIN_RESULTS:
+                break
 
     for biz in results[:400]:
         email = find_email_on_website(biz["website"])
@@ -130,11 +148,16 @@ def run_scraper_process(categories, zipcode, radius):
             log_message(f"📇 {biz['name']} (No Email) → List 5")
         time.sleep(0.5)
 
+        # ✅ safety check during upload loop
+        if time.time() - start_time > MAX_RUNTIME and uploaded >= MIN_RESULTS:
+            log_message("⏰ Timeout hit during upload loop — wrapping up early.")
+            break
+
     os.makedirs("runs", exist_ok=True)
     fname = f"runs/run_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
     pd.DataFrame(results).to_excel(fname, index=False)
     log_message(f"📁 Saved as {fname}")
-    log_message(f"🎯 Finished — {uploaded} uploaded.")
+    log_message(f"🎯 Finished — {uploaded} uploaded ({len(results)} scraped).")
     scraper_in_progress = False
 
 BASE_STYLE = """
