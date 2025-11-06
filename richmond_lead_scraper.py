@@ -194,10 +194,21 @@ border:1px solid #00bfff;border-radius:10px;padding:20px}
 def home():
     grouped = {
         "Food & Drink":["Restaurants","Bars & Clubs","Coffee Shops","Bakeries","Breweries","Cafes","Juice Bars"],
+        "Retail & Shopping":["Retail Stores","Boutiques","Clothing Stores","Gift Shops","Bookstores","Home Goods Stores"],
+        "Beauty & Wellness":["Salons","Barbers","Spas","Massage Therapy","Nail Salons"],
+        "Fitness & Recreation":["Gyms","Yoga Studios","Martial Arts","CrossFit","Dance Studios"],
         "Home Services":["HVAC","Plumbing","Electricians","Landscaping","Cleaning Services","Painting","Roofing","Pest Control"],
+        "Auto Services":["Auto Repair","Car Wash","Tire Shops","Car Dealerships","Detailing"],
+        "Insurance & Finance":["Insurance Agencies","Banks","Credit Unions","Financial Advisors"],
         "Events & Entertainment":["Event Venues","Wedding Planners","Catering","Escape Rooms","Putt Putt","Bowling Alleys"],
-        "Professional Services":["Law Firms","Accountants","Consulting Firms"]
+        "Construction & Real Estate":["Construction Companies","Contractors","Real Estate Agencies","Home Builders"],
+        "Health & Medical":["Dentists","Doctors","Chiropractors","Physical Therapy","Veterinarians"],
+        "Pets":["Pet Groomers","Pet Boarding","Pet Stores"],
+        "Education & Childcare":["Daycares","Private Schools","Tutoring Centers","Learning Centers"],
+        "Professional Services":["Law Firms","Accountants","Consulting Firms"],
+        "Community & Nonprofits":["Churches","Nonprofits","Community Centers"]
     }
+
     html = f"""{BASE_STYLE}
 <div class='navbar'>
  <a href='/'>Home</a> | <a href='/previous'>Previous Runs</a> | <a href='/about'>About</a> | <a href='/help'>Help</a>
@@ -246,6 +257,7 @@ border:1px solid #00bfff;border-radius:10px;padding:20px}
 <h2>Running… Logs below</h2>
 <div id="timer">⏱ 3:00 remaining</div>
 <div id='log-box'></div>
+{% raw %}
 <script>
 let remaining = 180;
 function updateTimer(){
@@ -265,7 +277,9 @@ async function fetchLogs(){
  box.scrollTop = box.scrollHeight;
 }
 setInterval(fetchLogs,2000);
-</script>"""
+</script>
+{% endraw %}
+"""
     return render_template_string(html)
 
 @app.route("/previous")
@@ -276,11 +290,11 @@ def previous():
 
 @app.route("/about")
 def about():
-    return render_template_string(f"{BASE_STYLE}<div class='navbar'><a href='/'>Home</a></div><h1>About</h1><p>This scraper runs for up to 3 minutes or until 30 leads are uploaded, whichever comes first.</p>")
+    return render_template_string(f"{BASE_STYLE}<div class='navbar'><a href='/'>Home</a></div><h1>About</h1><p>Business Lead Scraper locates local businesses via Google Places, extracts contact info, and uploads results to Brevo lists.</p>")
 
 @app.route("/help")
 def help_page():
-    return render_template_string(f"{BASE_STYLE}<div class='navbar'><a href='/'>Home</a></div><h1>Help</h1><p>1. Select categories.<br>2. Enter ZIP and radius.<br>3. Click Start Search.<br>4. Watch the live logs and countdown timer.</p>")
+    return render_template_string(f"{BASE_STYLE}<div class='navbar'><a href='/'>Home</a></div><h1>Help</h1><p>1 Select categories.<br>2 Enter ZIP and radius.<br>3 Click Start Search.<br>4 View logs live as data collects.</p>")
 
 @app.route("/logs")
 def logs():
