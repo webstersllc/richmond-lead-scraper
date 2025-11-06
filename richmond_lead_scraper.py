@@ -1,4 +1,4 @@
-import os, requests, json, re, time
+import os, requests, json, re, time, threading
 import pandas as pd
 from datetime import datetime
 from flask import Flask, render_template_string, request, jsonify
@@ -12,6 +12,10 @@ if not GOOGLE_API_KEY or not BREVO_API_KEY:
 app = Flask(__name__)
 scraper_logs, seen_emails = [], set()
 scraper_in_progress = False
+STOP_EVENT = threading.Event()
+
+def should_stop():
+    return STOP_EVENT.is_set()
 
 def log_message(msg):
     ts = datetime.now().strftime("%H:%M:%S")
@@ -22,21 +26,39 @@ def log_message(msg):
         scraper_logs.pop(0)
 
 def get_businesses_from_google(cat, zipcode, radius_miles):
+    if should_stop():
+        return []
     radius_meters = int(radius_miles) * 1609
     query = f"{cat} near {zipcode}"
     url = f"https://maps.googleapis.com/maps/api/place/textsearch/json?query={query}&radius={radius_meters}&key={GOOGLE_API_KEY}"
-    log_message(f"🔎 Searching {cat} near {zipcode} ({radius_miles} mi radius)…")
-    r = requests.get(url).json()
+    log_message(f"🔎 Searching {cat} near {zipcode} ({radius_miles} mi radius)...")
+    try:
+        r = requests.get(url, timeout=10).json()
+    except Exception as e:
+        log_message(f"⚠️ Google search error: {e}")
+        return []
     results = r.get("results", [])
     log_message(f"📍 Retrieved {len(results)} {cat} results total.")
     out = []
     for res in results:
+        if should_stop():
+            break
         name = res.get("name", "Unknown")
         pid = res.get("place_id")
-        det = requests.get(
-            f"https://maps.googleapis.com/maps/api/place/details/json?place_id={pid}&fields=name,website,formatted_phone_number&key={GOOGLE_API_KEY}"
-        ).json().get("result", {})
-        out.append({"name": name, "website": det.get("website", ""), "phone": det.get("formatted_phone_number", "")})
+        if not pid:
+            continue
+        try:
+            det = requests.get(
+                f"https://maps.googleapis.com/maps/api/place/details/json?place_id={pid}&fields=name,website,formatted_phone_number&key={GOOGLE_API_KEY}",
+                timeout=10
+            ).json().get("result", {})
+        except Exception:
+            det = {}
+        out.append({
+            "name": name if name and name != "Unknown" else res.get("vicinity", "Unknown"),
+            "website": det.get("website", ""),
+            "phone": det.get("formatted_phone_number", "")
+        })
         time.sleep(0.2)
     return out
 
@@ -95,166 +117,66 @@ def run_scraper_process(categories, zipcode, radius):
     scraper_in_progress = True
     scraper_logs.clear()
     seen_emails.clear()
+    STOP_EVENT.clear()
+
     log_message("🚀 Scraper started.")
 
-    MAX_RUNTIME = 600   # 10 minutes
+    MAX_RUNTIME = 600   # seconds
     MIN_RESULTS = 50
     start = time.time()
+
+    timer = threading.Timer(MAX_RUNTIME, STOP_EVENT.set)
+    timer.start()
+
     results, uploaded = [], 0
 
-    for c in categories:
-        if time.time() - start > MAX_RUNTIME and len(results) >= MIN_RESULTS:
-            log_message(f"⏰ Timeout reached after {len(results)} results — stopping early.")
-            break
-        results.extend(get_businesses_from_google(c, zipcode, radius))
-
-    if len(results) < MIN_RESULTS:
-        log_message(f"⚠️ Only {len(results)} results found — continuing until minimum reached.")
-        for c in categories[:3]:
+    try:
+        for c in categories:
+            if should_stop() and len(results) >= MIN_RESULTS:
+                log_message(f"⏰ Timeout reached after {len(results)} results — stopping early.")
+                break
             results.extend(get_businesses_from_google(c, zipcode, radius))
-            if len(results) >= MIN_RESULTS:
+            if len(results) >= 2000:
+                log_message("🔒 Result cap reached. Proceeding to upload.")
                 break
 
-    for biz in results[:400]:
-        email = find_email_on_website(biz["website"])
-        owner, phone = find_owner_name_and_phone(biz["website"])
-        contact = {"name": biz["name"], "phone": phone or biz["phone"], "website": biz["website"], "email": email, "owner_name": owner}
-        if email and email in seen_emails:
-            log_message(f"⚠️ Duplicate skipped: {email}")
-            continue
-        if email:
-            add_to_brevo(contact, True)
-            seen_emails.add(email)
-            uploaded += 1
-            log_message(f"✅ {biz['name']} ({email}) → List 3")
-        else:
-            add_to_brevo(contact, False)
-            uploaded += 1
-            log_message(f"📇 {biz['name']} (No Email) → List 5")
-        time.sleep(0.5)
-        if time.time() - start > MAX_RUNTIME and uploaded >= MIN_RESULTS:
-            log_message("⏰ Timeout hit during upload — wrapping up early.")
-            break
+        if len(results) < MIN_RESULTS and not should_stop():
+            log_message(f"⚠️ Only {len(results)} results found — continuing until minimum reached.")
+            for c in categories[:3]:
+                if should_stop() and len(results) >= MIN_RESULTS:
+                    break
+                results.extend(get_businesses_from_google(c, zipcode, radius))
+                if len(results) >= MIN_RESULTS:
+                    break
 
-    os.makedirs("runs", exist_ok=True)
-    fname = f"runs/run_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
-    pd.DataFrame(results).to_excel(fname, index=False)
-    log_message(f"📁 Saved as {fname}")
-    log_message(f"🎯 Finished — {uploaded} uploaded ({len(results)} scraped).")
-    scraper_in_progress = False
+        for biz in results[:400]:
+            if should_stop() and uploaded >= MIN_RESULTS:
+                log_message("⏰ Timeout hit during upload — wrapping up.")
+                break
 
-BASE_STYLE = """
-<style>
-body{background:#000;color:#00bfff;font-family:Consolas,monospace;text-align:center;padding:20px}
-h1{color:#00bfff}h2{color:#0099ff}
-button,input[type=text]{padding:10px;margin:5px;border-radius:6px;font-weight:bold}
-.navbar{margin-bottom:20px}
-.navbar a{color:#00bfff;margin:0 10px;text-decoration:none}
-#log-box{width:80%;margin:20px auto;text-align:left;height:400px;overflow-y:auto;background:#0a0a0a;
-border:1px solid #00bfff;border-radius:10px;padding:20px}
-.grid{display:flex;flex-wrap:wrap;justify-content:center;gap:15px;margin-top:10px}
-.group{border:1px solid #00bfff;border-radius:10px;padding:10px;width:250px}
-.group h3{color:#00bfff;cursor:pointer;text-decoration:underline}
-</style>
-"""
+            email = find_email_on_website(biz["website"])
+            owner, phone = find_owner_name_and_phone(biz["website"])
+            contact = {"name": biz["name"], "phone": phone or biz.get("phone", ""), "website": biz["website"], "email": email, "owner_name": owner}
+            if email and email in seen_emails:
+                log_message(f"⚠️ Duplicate skipped: {email}")
+                continue
+            if email:
+                add_to_brevo(contact, True)
+                seen_emails.add(email)
+                uploaded += 1
+                log_message(f"✅ {biz['name']} ({email}) → List 3")
+            else:
+                add_to_brevo(contact, False)
+                uploaded += 1
+                log_message(f"📇 {biz['name']} (No Email) → List 5")
+            time.sleep(0.4)
 
-@app.route("/")
-def home():
-    grouped = {
-        "Food & Drink":["Restaurants","Bars & Clubs","Coffee Shops","Bakeries","Breweries","Cafes","Juice Bars"],
-        "Retail & Shopping":["Retail Stores","Boutiques","Clothing Stores","Gift Shops","Bookstores","Home Goods Stores"],
-        "Beauty & Wellness":["Salons","Barbers","Spas","Massage Therapy","Nail Salons"],
-        "Fitness & Recreation":["Gyms","Yoga Studios","Martial Arts","CrossFit","Dance Studios"],
-        "Home Services":["HVAC","Plumbing","Electricians","Landscaping","Cleaning Services","Painting","Roofing","Pest Control"],
-        "Auto Services":["Auto Repair","Car Wash","Tire Shops","Car Dealerships","Detailing"],
-        "Insurance & Finance":["Insurance Agencies","Banks","Credit Unions","Financial Advisors"],
-        "Events & Entertainment":["Event Venues","Wedding Planners","Catering","Escape Rooms","Putt Putt","Bowling Alleys"],
-        "Construction & Real Estate":["Construction Companies","Contractors","Real Estate Agencies","Home Builders"],
-        "Health & Medical":["Dentists","Doctors","Chiropractors","Physical Therapy","Veterinarians"],
-        "Pets":["Pet Groomers","Pet Boarding","Pet Stores"],
-        "Education & Childcare":["Daycares","Private Schools","Tutoring Centers","Learning Centers"],
-        "Professional Services":["Law Firms","Accountants","Consulting Firms"],
-        "Community & Nonprofits":["Churches","Nonprofits","Community Centers"]
-    }
-    html = f"""{BASE_STYLE}
-<div class='navbar'>
- <a href='/'>Home</a> | <a href='/previous'>Previous Runs</a> | <a href='/about'>About</a> | <a href='/help'>Help</a>
-</div>
-<h1>Business Lead Scraper</h1>
-<h2>Select categories and enter ZIP & radius</h2>
-<form action='/run' method='get'><div class='grid'>"""
-    for g,cats in grouped.items():
-        html += f"<div class='group'><h3 onclick=\"toggleGroup('{g}')\">{g}</h3>"
-        for c in cats:
-            html += f"<label><input type='checkbox' name='categories' value='{c}'> {c}</label><br>"
-        html += "</div>"
-    html += """</div><br>
-ZIP Code: <input type='text' name='zipcode' required>
-Radius (mi): <input type='text' name='radius' required value='10'><br><br>
-<button type='submit'>Start Search</button></form>
-<script>
-function toggleGroup(name){
-  const groups=document.querySelectorAll('.group');
-  groups.forEach(div=>{
-    const h=div.querySelector('h3');
-    if(h&&h.textContent.trim()===name){
-      const boxes=div.querySelectorAll('input[type="checkbox"]');
-      const allChecked=[...boxes].every(b=>b.checked);
-      boxes.forEach(b=>b.checked=!allChecked);
-    }
-  });
-}
-</script>"""
-    return render_template_string(html)
-
-@app.route("/run")
-def run_scraper():
-    cats=request.args.getlist("categories")
-    zipc=request.args.get("zipcode","23220")
-    rad=request.args.get("radius","10")
-    import threading
-    threading.Thread(target=run_scraper_process,args=(cats,zipc,rad)).start()
-    html = r"""<style>
-body{background:#000;color:#00bfff;font-family:Consolas,monospace;text-align:center;padding:20px}
-h1{color:#00bfff}h2{color:#0099ff}
-#log-box{width:80%;margin:20px auto;text-align:left;height:400px;overflow-y:auto;background:#0a0a0a;
-border:1px solid #00bfff;border-radius:10px;padding:20px}
-.navbar a{color:#00bfff;margin:0 10px;text-decoration:none}
-</style>
-<div class='navbar'><a href='/'>Back</a> | <a href='/previous'>Previous Runs</a> |
-<a href='/about'>About</a> | <a href='/help'>Help</a></div>
-<h1>Business Lead Scraper</h1><h2>Running… Logs below</h2>
-<div id='log-box'></div>
-<script>
-async function fetchLogs(){
- const r = await fetch('/logs');
- const d = await r.json();
- const box = document.getElementById('log-box');
- box.innerHTML = d.logs.map(l => '<div>' + l + '</div>').join('');
- box.scrollTop = box.scrollHeight;
-}
-setInterval(fetchLogs,2000);
-</script>"""
-    return render_template_string(html)
-
-@app.route("/previous")
-def previous():
-    files=os.listdir("runs") if os.path.exists("runs") else []
-    links="".join(f"<li><a href='/runs/{f}'>{f}</a></li>" for f in files)
-    return render_template_string(f"{BASE_STYLE}<div class='navbar'><a href='/'>Home</a></div><h1>Previous Runs</h1><ul>{links}</ul>")
-
-@app.route("/about")
-def about():
-    return render_template_string(f"{BASE_STYLE}<div class='navbar'><a href='/'>Home</a></div><h1>About</h1><p>Business Lead Scraper locates local businesses via Google Places, extracts contact info, and uploads results to Brevo lists.</p>")
-
-@app.route("/help")
-def help_page():
-    return render_template_string(f"{BASE_STYLE}<div class='navbar'><a href='/'>Home</a></div><h1>Help</h1><p>1 Select categories.<br>2 Enter ZIP and radius.<br>3 Click Start Search.<br>4 View logs live as data collects.</p>")
-
-@app.route("/logs")
-def logs():
-    return jsonify({"logs": scraper_logs})
-
-if __name__=="__main__":
-    app.run(host="0.0.0.0",port=10000)
-
+        os.makedirs("runs", exist_ok=True)
+        fname = f"runs/run_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        pd.DataFrame(results).to_excel(fname, index=False)
+        log_message(f"📁 Saved as {fname}")
+        log_message(f"🎯 Finished — {uploaded} uploaded ({len(results)} scraped).")
+    finally:
+        timer.cancel()
+        STOP_EVENT.clear()
+        scraper_in_progress = False
