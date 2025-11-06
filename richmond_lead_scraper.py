@@ -16,7 +16,7 @@ if not GOOGLE_API_KEY or not BREVO_API_KEY:
 app = Flask(__name__)
 scraper_logs = []
 seen_emails = set()
-scraper_in_progress = False  # ✅ NEW: Prevent multiple runs
+scraper_in_progress = False
 
 def log_message(message):
     timestamp = datetime.now().strftime("%H:%M:%S")
@@ -33,7 +33,7 @@ def get_businesses_from_google(category, zipcode, radius_miles):
     log_message(f"🔎 Searching {category} near {zipcode} ({radius_miles} mi radius)…")
     resp = requests.get(url)
     results = resp.json().get("results", [])
-    log_message(f"📍 Retrieved {len(results)} {category} results total.")  # ✅ simplified log once
+    log_message(f"📍 Retrieved {len(results)} {category} results total.")
     data = []
     for r in results:
         name = r.get("name", "Unknown Business")
@@ -98,7 +98,7 @@ def add_to_brevo(contact, has_email=True):
 def run_scraper_process(categories, zipcode, radius):
     global scraper_in_progress
     if scraper_in_progress:
-        log_message("⚠️ A scraper is already running. Please wait for it to finish.")  # ✅ Prevent multiple threads
+        log_message("⚠️ A scraper is already running. Please wait for it to finish.")
         return
     scraper_in_progress = True
 
@@ -115,7 +115,6 @@ def run_scraper_process(categories, zipcode, radius):
         contact = {"name": biz["name"], "phone": phone or biz["phone"], "website": biz["website"],
                    "email": email, "owner_name": owner}
 
-        # ✅ NEW: skip duplicates before uploading
         if email and email in seen_emails:
             log_message(f"⚠️ Duplicate skipped before upload: {email}")
             continue
@@ -136,7 +135,7 @@ def run_scraper_process(categories, zipcode, radius):
     pd.DataFrame(results).to_excel(fname, index=False)
     log_message(f"📁 Saved as {fname}")
     log_message(f"🎯 Finished — {uploaded} uploaded.")
-    scraper_in_progress = False  # ✅ reset lock when done
+    scraper_in_progress = False
 
 BASE_STYLE = """
 <style>
@@ -156,20 +155,10 @@ border:1px solid #00bfff;border-radius:10px;padding:20px}
 @app.route("/")
 def home():
     grouped = {
+        "Home Services":["Landscaping","HVAC","Plumbing","Electricians","Cleaning Services","Painting","Roofing","Pest Control"],
         "Food & Drink":["Restaurants","Bars & Clubs","Coffee Shops","Bakeries","Breweries","Cafes","Juice Bars"],
         "Retail & Shopping":["Retail Stores","Boutiques","Clothing Stores","Gift Shops","Bookstores","Home Goods Stores"],
-        "Beauty & Wellness":["Salons","Barbers","Spas","Massage Therapy","Nail Salons"],
-        "Fitness & Recreation":["Gyms","Yoga Studios","Martial Arts","CrossFit","Dance Studios"],
-        "Home Services":["HVAC","Plumbing","Electricians","Landscaping","Cleaning Services","Painting","Roofing","Pest Control"],
-        "Auto Services":["Auto Repair","Car Wash","Tire Shops","Car Dealerships","Detailing"],
-        "Insurance & Finance":["Insurance Agencies","Banks","Credit Unions","Financial Advisors"],
         "Events & Entertainment":["Event Venues","Wedding Planners","Catering","Escape Rooms","Putt Putt","Bowling Alleys"],
-        "Construction & Real Estate":["Construction Companies","Contractors","Real Estate Agencies","Home Builders"],
-        "Health & Medical":["Dentists","Doctors","Chiropractors","Physical Therapy","Veterinarians"],
-        "Pets":["Pet Groomers","Pet Boarding","Pet Stores"],
-        "Education & Childcare":["Daycares","Private Schools","Tutoring Centers","Learning Centers"],
-        "Professional Services":["Law Firms","Accountants","Consulting Firms"],
-        "Community & Nonprofits":["Churches","Nonprofits","Community Centers"]
     }
     html = f"""{BASE_STYLE}
 <div class='navbar'>
@@ -209,17 +198,24 @@ def run_scraper():
     rad=request.args.get("radius","10")
     import threading
     threading.Thread(target=run_scraper_process,args=(cats,zipc,rad)).start()
-    html=f"""{BASE_STYLE}
+    html = r"""<style>
+body{background:#000;color:#00bfff;font-family:Consolas,monospace;text-align:center;padding:20px}
+h1{color:#00bfff}h2{color:#0099ff}
+#log-box{width:80%;margin:20px auto;text-align:left;height:400px;overflow-y:auto;background:#0a0a0a;
+border:1px solid #00bfff;border-radius:10px;padding:20px}
+.navbar a{color:#00bfff;margin:0 10px;text-decoration:none}
+</style>
 <div class='navbar'><a href='/'>Back</a> | <a href='/previous'>Previous Runs</a> |
 <a href='/about'>About</a> | <a href='/help'>Help</a></div>
 <h1>Business Lead Scraper</h1><h2>Running… Logs below</h2>
 <div id='log-box'></div>
 <script>
 async function fetchLogs(){
- const r=await fetch('/logs'); const d=await r.json();
- const box=document.getElementById('log-box');
- box.innerHTML=d.logs.map(l=>`<div>${l}</div>`).join('');
- box.scrollTop=box.scrollHeight;
+ const r = await fetch('/logs');
+ const d = await r.json();
+ const box = document.getElementById('log-box');
+ box.innerHTML = d.logs.map(l => '<div>' + l + '</div>').join('');
+ box.scrollTop = box.scrollHeight;
 }
 setInterval(fetchLogs,2000);
 </script>"""
