@@ -1,11 +1,7 @@
-import os
-import requests
-import json
-from flask import Flask, render_template_string, request, jsonify
-from datetime import datetime
-import time
-import re
+import os, requests, json, re, time
 import pandas as pd
+from datetime import datetime
+from flask import Flask, render_template_string, request, jsonify
 
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 BREVO_API_KEY = os.getenv("BREVO_API_KEY")
@@ -14,47 +10,43 @@ if not GOOGLE_API_KEY or not BREVO_API_KEY:
     raise ValueError("Missing GOOGLE_API_KEY or BREVO_API_KEY")
 
 app = Flask(__name__)
-scraper_logs = []
-seen_emails = set()
+scraper_logs, seen_emails = [], set()
 scraper_in_progress = False
 
-def log_message(message):
-    timestamp = datetime.now().strftime("%H:%M:%S")
-    entry = f"[{timestamp}] {message}"
-    print(entry)
-    scraper_logs.append(entry)
+def log_message(msg):
+    ts = datetime.now().strftime("%H:%M:%S")
+    line = f"[{ts}] {msg}"
+    print(line)
+    scraper_logs.append(line)
     if len(scraper_logs) > 400:
         scraper_logs.pop(0)
 
-def get_businesses_from_google(category, zipcode, radius_miles):
+def get_businesses_from_google(cat, zipcode, radius_miles):
     radius_meters = int(radius_miles) * 1609
-    query = f"{category} near {zipcode}"
+    query = f"{cat} near {zipcode}"
     url = f"https://maps.googleapis.com/maps/api/place/textsearch/json?query={query}&radius={radius_meters}&key={GOOGLE_API_KEY}"
-    log_message(f"🔎 Searching {category} near {zipcode} ({radius_miles} mi radius)…")
-    resp = requests.get(url)
-    results = resp.json().get("results", [])
-    log_message(f"📍 Retrieved {len(results)} {category} results total.")
-    data = []
-    for r in results:
-        name = r.get("name", "Unknown Business")
-        pid = r.get("place_id")
-        deturl = f"https://maps.googleapis.com/maps/api/place/details/json?place_id={pid}&fields=name,website,formatted_phone_number&key={GOOGLE_API_KEY}"
-        det = requests.get(deturl).json().get("result", {})
-        data.append({
-            "name": name,
-            "website": det.get("website", ""),
-            "phone": det.get("formatted_phone_number", "")
-        })
+    log_message(f"🔎 Searching {cat} near {zipcode} ({radius_miles} mi radius)…")
+    r = requests.get(url).json()
+    results = r.get("results", [])
+    log_message(f"📍 Retrieved {len(results)} {cat} results total.")
+    out = []
+    for res in results:
+        name = res.get("name", "Unknown")
+        pid = res.get("place_id")
+        det = requests.get(
+            f"https://maps.googleapis.com/maps/api/place/details/json?place_id={pid}&fields=name,website,formatted_phone_number&key={GOOGLE_API_KEY}"
+        ).json().get("result", {})
+        out.append({"name": name, "website": det.get("website", ""), "phone": det.get("formatted_phone_number", "")})
         time.sleep(0.2)
-    return data
+    return out
 
 def find_email_on_website(url):
     if not url:
         return ""
     try:
         r = requests.get(url, timeout=6)
-        emails = re.findall(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", r.text)
-        for e in emails:
+        em = re.findall(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", r.text)
+        for e in em:
             if not any(bad in e for bad in ["example","wixpress","sentry","schema"]):
                 return e
     except Exception:
@@ -68,9 +60,9 @@ def find_owner_name_and_phone(url):
         r = requests.get(url, timeout=6)
         txt = re.sub(r"<[^>]*>", " ", r.text)
         txt = re.sub(r"\s+", " ", txt)
-        for line in txt.split("."):
-            if any(k in line.lower() for k in ["owner","ceo","founder","manager","director","president"]):
-                nm = re.search(r"\b([A-Z][a-z]+ [A-Z][a-z]+)\b", line)
+        for ln in txt.split("."):
+            if any(k in ln.lower() for k in ["owner","ceo","founder","manager","director","president"]):
+                nm = re.search(r"\b([A-Z][a-z]+ [A-Z][a-z]+)\b", ln)
                 if nm:
                     ph = re.search(r"\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}", txt)
                     return nm.group(1), ph.group(0) if ph else ""
@@ -98,30 +90,26 @@ def add_to_brevo(contact, has_email=True):
 def run_scraper_process(categories, zipcode, radius):
     global scraper_in_progress
     if scraper_in_progress:
-        log_message("⚠️ A scraper is already running. Please wait for it to finish.")
+        log_message("⚠️ Already running. Please wait.")
         return
     scraper_in_progress = True
-
     scraper_logs.clear()
     seen_emails.clear()
     log_message("🚀 Scraper started.")
+
+    MAX_RUNTIME = 600   # 10 minutes
+    MIN_RESULTS = 50
+    start = time.time()
     results, uploaded = [], 0
-    start_time = time.time()
-    MAX_RUNTIME = 600      # seconds (10 minutes)
-    MIN_RESULTS = 50       # minimum before early exit
 
     for c in categories:
-        # stop if timeout reached AND minimum already met
-        if time.time() - start_time > MAX_RUNTIME and len(results) >= MIN_RESULTS:
+        if time.time() - start > MAX_RUNTIME and len(results) >= MIN_RESULTS:
             log_message(f"⏰ Timeout reached after {len(results)} results — stopping early.")
             break
-
         results.extend(get_businesses_from_google(c, zipcode, radius))
 
-    # If not enough results, warn user
     if len(results) < MIN_RESULTS:
         log_message(f"⚠️ Only {len(results)} results found — continuing until minimum reached.")
-        # Try once more with a few top categories again
         for c in categories[:3]:
             results.extend(get_businesses_from_google(c, zipcode, radius))
             if len(results) >= MIN_RESULTS:
@@ -130,13 +118,10 @@ def run_scraper_process(categories, zipcode, radius):
     for biz in results[:400]:
         email = find_email_on_website(biz["website"])
         owner, phone = find_owner_name_and_phone(biz["website"])
-        contact = {"name": biz["name"], "phone": phone or biz["phone"], "website": biz["website"],
-                   "email": email, "owner_name": owner}
-
+        contact = {"name": biz["name"], "phone": phone or biz["phone"], "website": biz["website"], "email": email, "owner_name": owner}
         if email and email in seen_emails:
-            log_message(f"⚠️ Duplicate skipped before upload: {email}")
+            log_message(f"⚠️ Duplicate skipped: {email}")
             continue
-
         if email:
             add_to_brevo(contact, True)
             seen_emails.add(email)
@@ -147,10 +132,8 @@ def run_scraper_process(categories, zipcode, radius):
             uploaded += 1
             log_message(f"📇 {biz['name']} (No Email) → List 5")
         time.sleep(0.5)
-
-        # ✅ safety check during upload loop
-        if time.time() - start_time > MAX_RUNTIME and uploaded >= MIN_RESULTS:
-            log_message("⏰ Timeout hit during upload loop — wrapping up early.")
+        if time.time() - start > MAX_RUNTIME and uploaded >= MIN_RESULTS:
+            log_message("⏰ Timeout hit during upload — wrapping up early.")
             break
 
     os.makedirs("runs", exist_ok=True)
@@ -178,10 +161,20 @@ border:1px solid #00bfff;border-radius:10px;padding:20px}
 @app.route("/")
 def home():
     grouped = {
-        "Home Services":["Landscaping","HVAC","Plumbing","Electricians","Cleaning Services","Painting","Roofing","Pest Control"],
         "Food & Drink":["Restaurants","Bars & Clubs","Coffee Shops","Bakeries","Breweries","Cafes","Juice Bars"],
         "Retail & Shopping":["Retail Stores","Boutiques","Clothing Stores","Gift Shops","Bookstores","Home Goods Stores"],
+        "Beauty & Wellness":["Salons","Barbers","Spas","Massage Therapy","Nail Salons"],
+        "Fitness & Recreation":["Gyms","Yoga Studios","Martial Arts","CrossFit","Dance Studios"],
+        "Home Services":["HVAC","Plumbing","Electricians","Landscaping","Cleaning Services","Painting","Roofing","Pest Control"],
+        "Auto Services":["Auto Repair","Car Wash","Tire Shops","Car Dealerships","Detailing"],
+        "Insurance & Finance":["Insurance Agencies","Banks","Credit Unions","Financial Advisors"],
         "Events & Entertainment":["Event Venues","Wedding Planners","Catering","Escape Rooms","Putt Putt","Bowling Alleys"],
+        "Construction & Real Estate":["Construction Companies","Contractors","Real Estate Agencies","Home Builders"],
+        "Health & Medical":["Dentists","Doctors","Chiropractors","Physical Therapy","Veterinarians"],
+        "Pets":["Pet Groomers","Pet Boarding","Pet Stores"],
+        "Education & Childcare":["Daycares","Private Schools","Tutoring Centers","Learning Centers"],
+        "Professional Services":["Law Firms","Accountants","Consulting Firms"],
+        "Community & Nonprofits":["Churches","Nonprofits","Community Centers"]
     }
     html = f"""{BASE_STYLE}
 <div class='navbar'>
