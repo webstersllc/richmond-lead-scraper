@@ -245,6 +245,7 @@ def run_scraper():
     cats = request.args.getlist("categories")
     zipc = request.args.get("zipcode", "23220")
     rad = request.args.get("radius", "10")
+    import threading
     threading.Thread(target=run_scraper_process, args=(cats, zipc, rad)).start()
 
     html = """
@@ -255,18 +256,23 @@ def run_scraper():
     #timer{font-size:20px;margin-top:10px;color:#00ffcc}
     @media (max-width:600px){#log-box{width:95%;height:300px;font-size:14px}#timer{font-size:18px}}
     </style>
+
     <h1>Business Lead Scraper</h1>
     <h2>Running… Logs below</h2>
     <div id="timer">⏱ 3:00 remaining</div>
-    <div id='log-box'></div>
+    <div id="log-box"></div>
+
     {% raw %}
     <script>
     let remaining = 180;
     function updateTimer(){
-      if(remaining <= 0){ document.getElementById('timer').innerText = '✅ Finished'; return; }
+      if(remaining <= 0){
+        document.getElementById('timer').innerText = '✅ Finished';
+        return;
+      }
       let mins = Math.floor(remaining/60);
       let secs = remaining % 60;
-      document.getElementById('timer').innerText = `⏱ ${mins}:${secs.toString().padStart(2,'0')} remaining`;
+      document.getElementById('timer').innerText = '⏱ ' + mins + ':' + secs.toString().padStart(2,'0') + ' remaining';
       remaining--;
     }
     setInterval(updateTimer,1000);
