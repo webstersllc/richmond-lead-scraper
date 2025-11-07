@@ -6,7 +6,6 @@ from datetime import datetime
 import time
 import re
 import pandas as pd
-import threading
 
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 BREVO_API_KEY = os.getenv("BREVO_API_KEY")
@@ -17,10 +16,7 @@ if not GOOGLE_API_KEY or not BREVO_API_KEY:
 app = Flask(__name__)
 scraper_logs = []
 seen_emails = set()
-scraper_in_progress = False
-
-TIMEOUT_SECONDS = 180
-MIN_LEADS = 30
+scraper_in_progress = False  # prevent multiple runs
 
 def log_message(message):
     timestamp = datetime.now().strftime("%H:%M:%S")
@@ -30,7 +26,7 @@ def log_message(message):
     if len(scraper_logs) > 400:
         scraper_logs.pop(0)
 
-def get_businesses_from_google(category, zipcode, radius_miles, start_time):
+def get_businesses_from_google(category, zipcode, radius_miles):
     radius_meters = int(radius_miles) * 1609
     query = f"{category} near {zipcode}"
     url = f"https://maps.googleapis.com/maps/api/place/textsearch/json?query={query}&radius={radius_meters}&key={GOOGLE_API_KEY}"
@@ -40,9 +36,6 @@ def get_businesses_from_google(category, zipcode, radius_miles, start_time):
     log_message(f"📍 Retrieved {len(results)} {category} results total.")
     data = []
     for r in results:
-        if time.time() - start_time >= TIMEOUT_SECONDS:
-            log_message("⏱ Timeout while fetching Google data.")
-            break
         name = r.get("name", "Unknown Business")
         pid = r.get("place_id")
         deturl = f"https://maps.googleapis.com/maps/api/place/details/json?place_id={pid}&fields=name,website,formatted_phone_number&key={GOOGLE_API_KEY}"
@@ -112,32 +105,22 @@ def run_scraper_process(categories, zipcode, radius):
     scraper_logs.clear()
     seen_emails.clear()
     log_message("🚀 Scraper started.")
-    start_time = time.time()
     results, uploaded = [], 0
-    next_log = 60
-
     for c in categories:
-        if time.time() - start_time >= TIMEOUT_SECONDS:
-            log_message("⏱ Timeout reached while searching.")
-            break
-        results.extend(get_businesses_from_google(c, zipcode, radius, start_time))
+        results.extend(get_businesses_from_google(c, zipcode, radius))
 
+    start_time = time.time()
     for biz in results[:400]:
-        elapsed = time.time() - start_time
-        if elapsed >= TIMEOUT_SECONDS:
-            log_message("⏱ Timeout reached — finalizing uploads.")
+        if time.time() - start_time > 180:  # 3 minute timeout
+            log_message("⏰ Timeout reached — stopping early and uploading what we have.")
             break
-        if uploaded >= MIN_LEADS:
-            log_message("✅ Minimum 30 leads reached — stopping early.")
-            break
-
         email = find_email_on_website(biz["website"])
         owner, phone = find_owner_name_and_phone(biz["website"])
         contact = {"name": biz["name"], "phone": phone or biz["phone"], "website": biz["website"],
                    "email": email, "owner_name": owner}
 
         if email and email in seen_emails:
-            log_message(f"⚠️ Duplicate skipped: {email}")
+            log_message(f"⚠️ Duplicate skipped before upload: {email}")
             continue
 
         if email:
@@ -149,14 +132,6 @@ def run_scraper_process(categories, zipcode, radius):
             add_to_brevo(contact, False)
             uploaded += 1
             log_message(f"📇 {biz['name']} (No Email) → List 5")
-
-        if elapsed >= next_log and elapsed < TIMEOUT_SECONDS:
-            remaining = TIMEOUT_SECONDS - int(elapsed)
-            mins = remaining // 60
-            secs = remaining % 60
-            log_message(f"⏱ {mins}:{secs:02d} remaining...")
-            next_log += 60
-
         time.sleep(0.5)
 
     os.makedirs("runs", exist_ok=True)
@@ -175,18 +150,9 @@ button,input[type=text]{padding:10px;margin:5px;border-radius:6px;font-weight:bo
 .navbar a{color:#00bfff;margin:0 10px;text-decoration:none}
 #log-box{width:80%;margin:20px auto;text-align:left;height:400px;overflow-y:auto;background:#0a0a0a;
 border:1px solid #00bfff;border-radius:10px;padding:20px}
-#timer{font-size:18px;margin-top:10px;color:#00ffcc}
 .grid{display:flex;flex-wrap:wrap;justify-content:center;gap:15px;margin-top:10px}
 .group{border:1px solid #00bfff;border-radius:10px;padding:10px;width:250px}
 .group h3{color:#00bfff;cursor:pointer;text-decoration:underline}
-
-@media (max-width:600px){
-  body{padding:10px}
-  button,input[type=text]{width:90%;font-size:16px;margin:8px auto;display:block}
-  #log-box{width:95%;height:300px}
-  .group{width:90%}
-  h1{font-size:1.8em}h2{font-size:1.1em}
-}
 </style>
 """
 
@@ -208,7 +174,6 @@ def home():
         "Professional Services":["Law Firms","Accountants","Consulting Firms"],
         "Community & Nonprofits":["Churches","Nonprofits","Community Centers"]
     }
-
     html = f"""{BASE_STYLE}
 <div class='navbar'>
  <a href='/'>Home</a> | <a href='/previous'>Previous Runs</a> | <a href='/about'>About</a> | <a href='/help'>Help</a>
@@ -248,14 +213,23 @@ def run_scraper():
     import threading
     threading.Thread(target=run_scraper_process, args=(cats, zipc, rad)).start()
 
-    html = """
+    html = '''
     <style>
-    body{background:#000;color:#00bfff;font-family:Consolas,monospace;text-align:center;padding:20px}
-    #log-box{width:80%;margin:20px auto;text-align:left;height:400px;overflow-y:auto;background:#0a0a0a;
-    border:1px solid #00bfff;border-radius:10px;padding:20px}
-    #timer{font-size:20px;margin-top:10px;color:#00ffcc}
-    @media (max-width:600px){#log-box{width:95%;height:300px;font-size:14px}#timer{font-size:18px}}
+    body {background:#000;color:#00bfff;font-family:Consolas,monospace;text-align:center;padding:20px;}
+    h1 {color:#00bfff;} h2 {color:#0099ff;}
+    #log-box {width:80%;margin:20px auto;text-align:left;height:400px;overflow-y:auto;background:#0a0a0a;
+    border:1px solid #00bfff;border-radius:10px;padding:20px;}
+    #timer {font-size:20px;margin-top:10px;color:#00ffcc;}
+    @media (max-width:600px){
+        #log-box{width:95%;height:300px;font-size:14px;}
+        #timer{font-size:18px;}
+    }
     </style>
+
+    <div class='navbar'>
+        <a href='/'>Back</a> | <a href='/previous'>Previous Runs</a> | 
+        <a href='/about'>About</a> | <a href='/help'>Help</a>
+    </div>
 
     <h1>Business Lead Scraper</h1>
     <h2>Running… Logs below</h2>
@@ -263,31 +237,31 @@ def run_scraper():
     <div id="log-box"></div>
 
     {% raw %}
-    <script>
+    <script type="text/javascript">
     let remaining = 180;
     function updateTimer(){
-      if(remaining <= 0){
-        document.getElementById('timer').innerText = '✅ Finished';
-        return;
-      }
-      let mins = Math.floor(remaining/60);
-      let secs = remaining % 60;
-      document.getElementById('timer').innerText = '⏱ ' + mins + ':' + secs.toString().padStart(2,'0') + ' remaining';
-      remaining--;
+        if(remaining <= 0){
+            document.getElementById('timer').innerText = '✅ Finished';
+            return;
+        }
+        let mins = Math.floor(remaining / 60);
+        let secs = remaining % 60;
+        document.getElementById('timer').innerText = '⏱ ' + mins + ':' + secs.toString().padStart(2, '0') + ' remaining';
+        remaining--;
     }
-    setInterval(updateTimer,1000);
+    setInterval(updateTimer, 1000);
 
     async function fetchLogs(){
-      const r = await fetch('/logs');
-      const d = await r.json();
-      const box = document.getElementById('log-box');
-      box.innerHTML = d.logs.map(l => '<div>' + l + '</div>').join('');
-      box.scrollTop = box.scrollHeight;
+        const r = await fetch('/logs');
+        const d = await r.json();
+        const box = document.getElementById('log-box');
+        box.innerHTML = d.logs.map(l => '<div>' + l + '</div>').join('');
+        box.scrollTop = box.scrollHeight;
     }
-    setInterval(fetchLogs,2000);
+    setInterval(fetchLogs, 2000);
     </script>
     {% endraw %}
-    """
+    '''
 
     return render_template_string(html)
 
