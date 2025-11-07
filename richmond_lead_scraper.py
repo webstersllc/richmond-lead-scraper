@@ -242,44 +242,47 @@ function toggleGroup(name){
 
 @app.route("/run")
 def run_scraper():
-    cats=request.args.getlist("categories")
-    zipc=request.args.get("zipcode","23220")
-    rad=request.args.get("radius","10")
-    threading.Thread(target=run_scraper_process,args=(cats,zipc,rad)).start()
-    html = r"""<style>
-body{background:#000;color:#00bfff;font-family:Consolas,monospace;text-align:center;padding:20px}
-#log-box{width:80%;margin:20px auto;text-align:left;height:400px;overflow-y:auto;background:#0a0a0a;
-border:1px solid #00bfff;border-radius:10px;padding:20px}
-#timer{font-size:20px;margin-top:10px;color:#00ffcc}
-@media (max-width:600px){#log-box{width:95%;height:300px;font-size:14px}#timer{font-size:18px}}
-</style>
-<h1>Business Lead Scraper</h1>
-<h2>Running… Logs below</h2>
-<div id="timer">⏱ 3:00 remaining</div>
-<div id='log-box'></div>
-{% raw %}
-<script>
-let remaining = 180;
-function updateTimer(){
-  if(remaining <= 0){ document.getElementById('timer').innerText = '✅ Finished'; return; }
-  let mins = Math.floor(remaining/60);
-  let secs = remaining % 60;
-  document.getElementById('timer').innerText = `⏱ ${mins}:${secs.toString().padStart(2,'0')} remaining`;
-  remaining--;
-}
-setInterval(updateTimer,1000);
+    cats = request.args.getlist("categories")
+    zipc = request.args.get("zipcode", "23220")
+    rad = request.args.get("radius", "10")
+    threading.Thread(target=run_scraper_process, args=(cats, zipc, rad)).start()
 
-async function fetchLogs(){
- const r = await fetch('/logs');
- const d = await r.json();
- const box = document.getElementById('log-box');
- box.innerHTML = d.logs.map(l => '<div>' + l + '</div>').join('');
- box.scrollTop = box.scrollHeight;
-}
-setInterval(fetchLogs,2000);
-</script>
-{% endraw %}
-"""
+    html = """
+    <style>
+    body{background:#000;color:#00bfff;font-family:Consolas,monospace;text-align:center;padding:20px}
+    #log-box{width:80%;margin:20px auto;text-align:left;height:400px;overflow-y:auto;background:#0a0a0a;
+    border:1px solid #00bfff;border-radius:10px;padding:20px}
+    #timer{font-size:20px;margin-top:10px;color:#00ffcc}
+    @media (max-width:600px){#log-box{width:95%;height:300px;font-size:14px}#timer{font-size:18px}}
+    </style>
+    <h1>Business Lead Scraper</h1>
+    <h2>Running… Logs below</h2>
+    <div id="timer">⏱ 3:00 remaining</div>
+    <div id='log-box'></div>
+    {% raw %}
+    <script>
+    let remaining = 180;
+    function updateTimer(){
+      if(remaining <= 0){ document.getElementById('timer').innerText = '✅ Finished'; return; }
+      let mins = Math.floor(remaining/60);
+      let secs = remaining % 60;
+      document.getElementById('timer').innerText = `⏱ ${mins}:${secs.toString().padStart(2,'0')} remaining`;
+      remaining--;
+    }
+    setInterval(updateTimer,1000);
+
+    async function fetchLogs(){
+      const r = await fetch('/logs');
+      const d = await r.json();
+      const box = document.getElementById('log-box');
+      box.innerHTML = d.logs.map(l => '<div>' + l + '</div>').join('');
+      box.scrollTop = box.scrollHeight;
+    }
+    setInterval(fetchLogs,2000);
+    </script>
+    {% endraw %}
+    """
+
     return render_template_string(html)
 
 @app.route("/previous")
