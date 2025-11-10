@@ -61,13 +61,29 @@ def log_message(message):
     if len(scraper_logs) > 400:
         scraper_logs.pop(0)
 
+# ========================================================================
+# UPDATED: Pull up to 100 results per category (with pagination)
+# ========================================================================
 def get_businesses_from_google(category, zipcode, radius_miles):
     radius_meters = int(radius_miles) * 1609
     query = f"{category} near {zipcode}"
-    url = f"https://maps.googleapis.com/maps/api/place/textsearch/json?query={query}&radius={radius_meters}&key={GOOGLE_API_KEY}"
     log_message(f"🔎 Searching {category} near {zipcode} ({radius_miles} mi radius)…")
-    resp = requests.get(url)
-    results = resp.json().get("results", [])
+
+    results = []
+    page_token = None
+    while True:
+        url = f"https://maps.googleapis.com/maps/api/place/textsearch/json?query={query}&radius={radius_meters}&key={GOOGLE_API_KEY}"
+        if page_token:
+            url += f"&pagetoken={page_token}"
+        resp = requests.get(url)
+        data = resp.json()
+        results.extend(data.get("results", []))
+
+        page_token = data.get("next_page_token")
+        if not page_token or len(results) >= 100:
+            break
+        time.sleep(2)
+
     log_message(f"📍 Retrieved {len(results)} {category} results total.")
     data = []
     for r in results:
@@ -84,8 +100,6 @@ def get_businesses_from_google(category, zipcode, radius_miles):
     return data
 
 # ========================================================================
-# Improved email finder with example email skip logic
-# ========================================================================
 def find_email_on_website(url):
     if not url:
         return ""
@@ -95,22 +109,18 @@ def find_email_on_website(url):
 
         for raw in candidates:
             e = raw.strip().strip('.,;:<>()[]{}"\'').lower()
-
             if e in EXAMPLE_EMAILS:
                 continue
             if any(frag in e for frag in BAD_EMAIL_FRAGMENTS):
                 continue
             if any(bad in e for bad in ["wixpress","sentry","schema.org","cloudflare","localhost"]):
                 continue
-
-            return e  # first valid email found
-
+            return e
     except Exception as err:
         log_message(f"Error scanning {url}: {err}")
     return ""
 
 # ========================================================================
-
 def find_owner_name_and_phone(url):
     if not url:
         return "", ""
@@ -129,6 +139,7 @@ def find_owner_name_and_phone(url):
     except Exception:
         return "", ""
 
+# ========================================================================
 def add_to_brevo(contact, has_email=True):
     url = "https://api.brevo.com/v3/contacts"
     headers = {"accept":"application/json","content-type":"application/json","api-key":BREVO_API_KEY}
@@ -145,6 +156,7 @@ def add_to_brevo(contact, has_email=True):
     r = requests.post(url, headers=headers, data=json.dumps(payload))
     log_message(f"Added to Brevo (List {'3' if has_email else '5'}): {contact.get('email','no email')} ({r.status_code})")
 
+# ========================================================================
 def run_scraper_process(categories, zipcode, radius):
     global scraper_in_progress
     if scraper_in_progress:
@@ -200,7 +212,7 @@ def run_scraper_process(categories, zipcode, radius):
     scraper_in_progress = False
 
 # ========================================================================
-# Existing HTML, layout, and routes stay exactly the same
+# HTML and routes stay unchanged
 # ========================================================================
 BASE_STYLE = """
 <style>
