@@ -1,15 +1,15 @@
 import os
 import requests
 import json
-from flask import Flask, render_template_string, request, jsonify, send_from_directory
+from flask import Flask, render_template_string, request, jsonify
 from datetime import datetime
 import time
 import re
 import pandas as pd
 
-# ---------------------------------------------------------
-# Environment variables
-# ---------------------------------------------------------
+# --------------------------------------------------------------------
+# Environment
+# --------------------------------------------------------------------
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 BREVO_API_KEY = os.getenv("BREVO_API_KEY")
 
@@ -20,12 +20,10 @@ app = Flask(__name__)
 
 scraper_logs = []
 seen_emails = set()
-scraper_in_progress = False  # prevent multiple runs
+scraper_in_progress = False  # prevent multiple runs in parallel
 
-# ---------------------------------------------------------
-# Bad / placeholder emails to ignore (Bertha v1)
-# ---------------------------------------------------------
-BAD_EMAILS = {
+# Emails to avoid (example / dummy emails)
+AVOID_EMAILS = {
     "johndoe@example.com",
     "janedoe@example.com",
     "yourname@example.com",
@@ -126,23 +124,27 @@ BAD_EMAILS = {
     "you@example.com",
     "your.email@example.com",
     "contactperson@example.com",
-    # generic examples that sometimes pop up
-    "user@domain.com",
-    "user@website.com",
 }
 
-# quick pattern-based ignores (domains etc)
-BAD_EMAIL_PATTERNS = [
+# extra patterns we never want
+BAD_EMAIL_SUBSTRINGS = [
     "example.com",
-    "wixpress.com",
+    "wixpress",
+    "sentry",
     "schema.org",
-    "sentry.io",
+    "domain.com",
+    "website.com",
+    "mysite.com",
+    "email.com",
+    "sample.com",
+    "demo.com",
 ]
 
-# ---------------------------------------------------------
+
+# --------------------------------------------------------------------
 # Logging helper
-# ---------------------------------------------------------
-def log_message(message: str):
+# --------------------------------------------------------------------
+def log_message(message: str) -> None:
     timestamp = datetime.now().strftime("%H:%M:%S")
     entry = f"[{timestamp}] {message}"
     print(entry)
@@ -150,77 +152,93 @@ def log_message(message: str):
     if len(scraper_logs) > 400:
         scraper_logs.pop(0)
 
-# ---------------------------------------------------------
-# Phone normalization for Brevo
-# ---------------------------------------------------------
-def normalize_phone(phone: str) -> str:
-    """
-    Normalize phone for Brevo's sms field.
-    - Strip non-digits
-    - If 10 digits, assume US and prefix +1
-    - If 11 digits and starts with 1, prefix +
-    - Otherwise return original stripped phone
-    """
-    if not phone:
-        return ""
-    digits = re.sub(r"\D", "", phone)
-    if len(digits) == 10:
-        return "+1" + digits
-    if len(digits) == 11 and digits.startswith("1"):
-        return "+" + digits
-    # if it already looks like +18045551212, leave as is
-    if phone.strip().startswith("+"):
-        return phone.strip()
-    return phone.strip()
 
-# ---------------------------------------------------------
-# Google Places search
-# ---------------------------------------------------------
-def get_businesses_from_google(category: str, zipcode: str, radius_miles: str):
+# --------------------------------------------------------------------
+# Google Places helper
+# --------------------------------------------------------------------
+def get_businesses_from_google(category: str, zipcode: str, radius_miles: str, max_results: int = 60):
     radius_meters = int(radius_miles) * 1609
     query = f"{category} near {zipcode}"
     url = (
         "https://maps.googleapis.com/maps/api/place/textsearch/json"
-        f"?query={query}&radius={radius_meters}&key={GOOGLE_API_KEY}"
+        f"?query={requests.utils.quote(query)}&radius={radius_meters}&key={GOOGLE_API_KEY}"
     )
     log_message(f"🔎 Searching {category} near {zipcode} ({radius_miles} mi radius)…")
-    resp = requests.get(url)
-    data = resp.json()
-    results = data.get("results", [])
-    log_message(f"📍 Retrieved {len(results)} {category} results total.")
+
+    all_results = []
+    page_token = None
+
+    while True:
+        final_url = url
+        if page_token:
+            final_url += f"&pagetoken={page_token}"
+
+        resp = requests.get(final_url)
+        data = resp.json()
+        results = data.get("results", [])
+        all_results.extend(results)
+
+        if len(all_results) >= max_results:
+            break
+
+        page_token = data.get("next_page_token")
+        if not page_token:
+            break
+
+        time.sleep(2.0)
+
+    log_message(f"📍 Retrieved {len(all_results)} {category} results total.")
 
     businesses = []
-    for r in results:
+    for r in all_results[:max_results]:
         name = r.get("name", "Unknown Business")
-        place_id = r.get("place_id")
+        pid = r.get("place_id")
         details_url = (
             "https://maps.googleapis.com/maps/api/place/details/json"
-            f"?place_id={place_id}&fields=name,website,formatted_phone_number&key={GOOGLE_API_KEY}"
+            f"?place_id={pid}&fields=name,website,formatted_phone_number&key={GOOGLE_API_KEY}"
         )
-        d = requests.get(details_url).json().get("result", {})
+        det = requests.get(details_url).json().get("result", {})
         businesses.append(
             {
                 "name": name,
-                "website": d.get("website", ""),
-                "phone": d.get("formatted_phone_number", ""),
+                "website": det.get("website", ""),
+                "phone": det.get("formatted_phone_number", ""),
                 "category": category,
             }
         )
         time.sleep(0.2)
+
     return businesses
 
-# ---------------------------------------------------------
-# Email scraping from a website
-# ---------------------------------------------------------
-def is_bad_email(email: str) -> bool:
-    e = email.strip().lower()
-    if e in BAD_EMAILS:
-        return True
-    for pat in BAD_EMAIL_PATTERNS:
-        if pat in e:
-            return True
-    return False
 
+# --------------------------------------------------------------------
+# Phone helpers
+# --------------------------------------------------------------------
+def normalize_phone_for_sms(raw_phone: str) -> str:
+    """
+    Convert things like '804-555-1234' or '(804) 555 1234'
+    into +18045551234 so Brevo will accept it in the SMS field.
+    """
+    if not raw_phone:
+        return ""
+
+    digits = re.sub(r"\D", "", raw_phone)
+
+    # US 10-digit number → +1XXXXXXXXXX
+    if len(digits) == 10:
+        return "+1" + digits
+
+    # 11-digit starting with 1 → +1XXXXXXXXXX
+    if len(digits) == 11 and digits.startswith("1"):
+        return "+" + digits
+
+    # Fallback: return original
+    return raw_phone
+
+
+# --------------------------------------------------------------------
+# Email + owner extraction from website
+# --------------------------------------------------------------------
 def find_email_on_website(url: str) -> str:
     if not url:
         return ""
@@ -228,17 +246,17 @@ def find_email_on_website(url: str) -> str:
         r = requests.get(url, timeout=6)
         emails = re.findall(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", r.text)
         for e in emails:
-            e_norm = e.strip()
-            if is_bad_email(e_norm):
+            e_lower = e.lower()
+            if e_lower in AVOID_EMAILS:
                 continue
-            return e_norm
-    except Exception as ex:
-        log_message(f"⚠️ Error scanning {url}: {ex}")
+            if any(bad in e_lower for bad in BAD_EMAIL_SUBSTRINGS):
+                continue
+            return e
+    except Exception as exc:
+        log_message(f"Error scanning {url} for email: {exc}")
     return ""
 
-# ---------------------------------------------------------
-# Owner / phone extraction from HTML
-# ---------------------------------------------------------
+
 def find_owner_name_and_phone(url: str):
     if not url:
         return "", ""
@@ -247,39 +265,37 @@ def find_owner_name_and_phone(url: str):
         txt = re.sub(r"<[^>]*>", " ", r.text)
         txt = re.sub(r"\s+", " ", txt)
 
-        owner_name = ""
-        phone = ""
+        owner_keywords = ["owner", "ceo", "founder", "manager", "director", "president"]
 
-        # try to find owner-style line
         for line in txt.split("."):
-            if any(k in line.lower() for k in ["owner", "ceo", "founder", "manager", "director", "president"]):
+            if any(k in line.lower() for k in owner_keywords):
                 nm = re.search(r"\b([A-Z][a-z]+ [A-Z][a-z]+)\b", line)
                 if nm:
-                    owner_name = nm.group(1)
-                    break
+                    ph_match = re.search(r"\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}", txt)
+                    phone = ph_match.group(0) if ph_match else ""
+                    return nm.group(1), phone
 
-        # generic phone search
         ph_match = re.search(r"\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}", txt)
-        if ph_match:
-            phone = ph_match.group(0)
-
-        return owner_name, phone
-    except Exception as ex:
-        log_message(f"⚠️ Error parsing {url}: {ex}")
+        phone = ph_match.group(0) if ph_match else ""
+        return "", phone
+    except Exception as exc:
+        log_message(f"Error parsing {url} for owner/phone: {exc}")
         return "", ""
 
-# ---------------------------------------------------------
-# Brevo contact creation (email and no-email paths)
-# ---------------------------------------------------------
+
+# --------------------------------------------------------------------
+# Brevo insertion
+# --------------------------------------------------------------------
 def add_to_brevo(contact: dict, has_email: bool = True):
     """
-    Sends contact to Brevo.
-    - If has_email True: real email used, list 3
-    - If has_email False: placeholder email, list 5
-    - Always tries to push phone both as:
-        • attributes['PHONE']  (for your custom attribute)
-        • sms                  (for Brevo's phone/SMS field)
+    Send contact to Brevo:
+      - List 3 if it has an email
+      - List 5 if it does not (we generate a placeholder email)
+      - Map phone to BOTH:
+          - attributes['PHONE'] (for your custom column if you enable it)
+          - attributes['sms']   (what Brevo actually uses for phone/SMS)
     """
+
     url = "https://api.brevo.com/v3/contacts"
     headers = {
         "accept": "application/json",
@@ -288,75 +304,98 @@ def add_to_brevo(contact: dict, has_email: bool = True):
     }
 
     raw_phone = (contact.get("phone") or "").strip()
-    phone_for_sms = normalize_phone(raw_phone)
+    sms_phone = normalize_phone_for_sms(raw_phone)
 
-    # Email logic
-    if has_email:
-        email_value = contact.get("email")
-    else:
-        # generate a deterministic placeholder based on business name
-        base = (contact.get("name") or "unknown").replace(" ", "").lower()
-        email_value = f"{base}@placeholder.com"
+    # Make sure first name is something useful
+    firstname = contact.get("owner_name") or contact.get("name") or ""
+
+    attrs = {
+        "FIRSTNAME": firstname,
+        "COMPANY": contact.get("name", ""),
+        "PHONE": raw_phone,
+        "WEBSITE": contact.get("website", ""),
+    }
+    if sms_phone:
+        # This is the key Brevo uses for phone
+        attrs["sms"] = sms_phone
+
+    email_value = contact.get("email") if has_email else f"{contact['name'].replace(' ', '').lower()}@placeholder.com"
 
     payload = {
         "email": email_value,
-        "attributes": {
-            # FIRSTNAME doubles as contact name if we don't have a personal name
-            "FIRSTNAME": contact.get("owner_name") or contact.get("name"),
-            "COMPANY": contact.get("name"),
-            "PHONE": raw_phone,  # your custom PHONE attribute
-            "WEBSITE": contact.get("website", ""),
-        },
+        "attributes": attrs,
         "listIds": [3 if has_email else 5],
     }
 
-    # Only include sms if we got something non-empty
-    if phone_for_sms:
-        payload["sms"] = phone_for_sms
+    r = requests.post(url, headers=headers, data=json.dumps(payload))
 
-    try:
-        r = requests.post(url, headers=headers, data=json.dumps(payload))
-        list_id = 3 if has_email else 5
-        log_message(
-            f"Added to Brevo (List {list_id}): {email_value} | phone: {raw_phone} "
-            f"→ status {r.status_code}"
-        )
-    except Exception as ex:
-        log_message(f"⚠️ Error sending to Brevo for {email_value}: {ex}")
+    log_message(
+        f"Added to Brevo (List {'3' if has_email else '5'}): "
+        f"{email_value} | phone_raw='{raw_phone}' sms='{sms_phone}' ({r.status_code})"
+    )
 
-# ---------------------------------------------------------
-# Scraper process
-# ---------------------------------------------------------
+
+# --------------------------------------------------------------------
+# Core scraper process
+# --------------------------------------------------------------------
 def run_scraper_process(categories, zipcode, radius):
     global scraper_in_progress
     if scraper_in_progress:
         log_message("⚠️ A scraper is already running. Please wait for it to finish.")
         return
-    scraper_in_progress = True
 
+    scraper_in_progress = True
     scraper_logs.clear()
     seen_emails.clear()
+
     log_message("🚀 Scraper started.")
 
-    all_results = []
-    uploaded = 0
+    TIMEOUT_SECONDS = 180  # 3 minutes
+    MIN_CONTACTS = 30
+    MAX_BUSINESSES = 400
 
-    # collect businesses for all selected categories
+    start_time = time.time()
+    all_businesses = []
+    seen_business_keys = set()
+
+    # 1. Gather businesses from all selected categories
     for c in categories:
-        all_results.extend(get_businesses_from_google(c, zipcode, radius))
+        if time.time() - start_time > TIMEOUT_SECONDS and len(all_businesses) >= MIN_CONTACTS:
+            log_message("⏱ Timeout reached while fetching businesses; continuing with what we have.")
+            break
 
-    # cap the processing to 400 to keep it reasonable
-    for biz in all_results[:400]:
+        biz_list = get_businesses_from_google(c, zipcode, radius)
+        for b in biz_list:
+            key = (b["name"], b["website"])
+            if key not in seen_business_keys:
+                seen_business_keys.add(key)
+                all_businesses.append(b)
+
+        if len(all_businesses) >= MAX_BUSINESSES:
+            log_message(f"⛔ Hit MAX_BUSINESSES limit of {MAX_BUSINESSES}.")
+            break
+
+    log_message(f"📊 Total unique businesses collected: {len(all_businesses)}")
+
+    # 2. Process each business, upload to Brevo, and store for Excel
+    uploaded = 0
+    rows_for_excel = []
+
+    for biz in all_businesses:
+        if time.time() - start_time > TIMEOUT_SECONDS and uploaded >= MIN_CONTACTS:
+            log_message("⏱ Timeout reached during processing; stopping uploads.")
+            break
+
         website = biz.get("website", "")
         base_phone = biz.get("phone", "")
 
         email = find_email_on_website(website)
-        owner, phone_from_page = find_owner_name_and_phone(website)
+        owner, phone_from_site = find_owner_name_and_phone(website)
 
-        final_phone = phone_from_page or base_phone
+        final_phone = phone_from_site or base_phone
 
         contact = {
-            "name": biz.get("name"),
+            "name": biz["name"],
             "phone": final_phone,
             "website": website,
             "email": email,
@@ -371,30 +410,52 @@ def run_scraper_process(categories, zipcode, radius):
             seen_emails.add(email)
             uploaded += 1
             log_message(f"✅ {biz['name']} ({email}) → List 3")
+            rows_for_excel.append(
+                {
+                    "Business Name": biz["name"],
+                    "Email": email,
+                    "Phone": final_phone,
+                    "Website": website,
+                    "Owner Name": owner,
+                    "Category": biz.get("category", ""),
+                    "List": "3",
+                }
+            )
         else:
-            # no email – send to list 5 using placeholder email
             add_to_brevo(contact, has_email=False)
             uploaded += 1
             log_message(f"📇 {biz['name']} (No Email) → List 5")
+            rows_for_excel.append(
+                {
+                    "Business Name": biz["name"],
+                    "Email": "",
+                    "Phone": final_phone,
+                    "Website": website,
+                    "Owner Name": owner,
+                    "Category": biz.get("category", ""),
+                    "List": "5",
+                }
+            )
 
         time.sleep(0.5)
 
-    # Save Excel of raw business results (not just uploaded)
-    os.makedirs("runs", exist_ok=True)
-    fname = f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
-    full_path = os.path.join("runs", fname)
+    # 3. Save to Excel
     try:
-        pd.DataFrame(all_results).to_excel(full_path, index=False)
-        log_message(f"📁 Saved as runs/{fname}")
-    except Exception as ex:
-        log_message(f"⚠️ Failed saving Excel run file: {ex}")
+        os.makedirs("runs", exist_ok=True)
+        fname = f"runs/run_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        df = pd.DataFrame(rows_for_excel)
+        df.to_excel(fname, index=False)
+        log_message(f"📁 Saved as {fname}")
+    except Exception as exc:
+        log_message(f"⚠️ Failed to save Excel: {exc}")
 
-    log_message(f"🎯 Finished — {uploaded} total contacts uploaded.")
+    log_message(f"🎯 Finished — {uploaded} uploaded.")
     scraper_in_progress = False
 
-# ---------------------------------------------------------
-# Base style shared across pages
-# ---------------------------------------------------------
+
+# --------------------------------------------------------------------
+# Basic shared styles for all pages
+# --------------------------------------------------------------------
 BASE_STYLE = """
 <style>
 body{
@@ -404,17 +465,15 @@ body{
   text-align:center;
   padding:20px;
 }
-h1{color:#00bfff}
-h2{color:#0099ff}
+h1{color:#00bfff;}
+h2{color:#0099ff;}
 button,input[type=text]{
   padding:10px;
   margin:5px;
   border-radius:6px;
   font-weight:bold;
 }
-.navbar{
-  margin-bottom:20px;
-}
+.navbar{margin-bottom:20px;}
 .navbar a{
   color:#00bfff;
   margin:0 10px;
@@ -442,115 +501,159 @@ button,input[type=text]{
   border:1px solid #00bfff;
   border-radius:10px;
   padding:10px;
-  width:250px;
+  width:260px;
 }
 .group h3{
   color:#00bfff;
   cursor:pointer;
   text-decoration:underline;
 }
-ul{list-style:none;padding:0}
-li{margin:5px 0}
+@media(max-width:768px){
+  #log-box{width:95%;}
+  .group{width:90%;}
+}
 </style>
 """
 
-# ---------------------------------------------------------
+
+# --------------------------------------------------------------------
 # Routes
-# ---------------------------------------------------------
+# --------------------------------------------------------------------
 @app.route("/")
 def home():
     grouped = {
         "Food & Drink": [
-            "Restaurants", "Bars & Clubs", "Coffee Shops", "Bakeries",
-            "Breweries", "Cafes", "Juice Bars"
+            "Restaurants",
+            "Bars & Clubs",
+            "Coffee Shops",
+            "Bakeries",
+            "Breweries",
+            "Cafes",
+            "Juice Bars",
         ],
         "Retail & Shopping": [
-            "Retail Stores", "Boutiques", "Clothing Stores", "Gift Shops",
-            "Bookstores", "Home Goods Stores"
+            "Retail Stores",
+            "Boutiques",
+            "Clothing Stores",
+            "Gift Shops",
+            "Bookstores",
+            "Home Goods Stores",
         ],
         "Beauty & Wellness": [
-            "Salons", "Barbers", "Spas", "Massage Therapy", "Nail Salons"
+            "Salons",
+            "Barbers",
+            "Spas",
+            "Massage Therapy",
+            "Nail Salons",
         ],
         "Fitness & Recreation": [
-            "Gyms", "Yoga Studios", "Martial Arts", "CrossFit", "Dance Studios"
+            "Gyms",
+            "Yoga Studios",
+            "Martial Arts",
+            "CrossFit",
+            "Dance Studios",
         ],
         "Home Services": [
-            "HVAC", "Plumbing", "Electricians", "Landscaping",
-            "Cleaning Services", "Painting", "Roofing", "Pest Control"
+            "HVAC",
+            "Plumbing",
+            "Electricians",
+            "Landscaping",
+            "Cleaning Services",
+            "Painting",
+            "Roofing",
+            "Pest Control",
         ],
         "Auto Services": [
-            "Auto Repair", "Car Wash", "Tire Shops",
-            "Car Dealerships", "Detailing"
+            "Auto Repair",
+            "Car Wash",
+            "Tire Shops",
+            "Car Dealerships",
+            "Detailing",
         ],
         "Insurance & Finance": [
-            "Insurance Agencies", "Banks", "Credit Unions", "Financial Advisors"
+            "Insurance Agencies",
+            "Banks",
+            "Credit Unions",
+            "Financial Advisors",
         ],
         "Events & Entertainment": [
-            "Event Venues", "Wedding Planners", "Catering",
-            "Escape Rooms", "Putt Putt", "Bowling Alleys"
+            "Event Venues",
+            "Wedding Planners",
+            "Catering",
+            "Escape Rooms",
+            "Putt Putt",
+            "Bowling Alleys",
         ],
         "Construction & Real Estate": [
-            "Construction Companies", "Contractors",
-            "Real Estate Agencies", "Home Builders"
+            "Construction Companies",
+            "Contractors",
+            "Real Estate Agencies",
+            "Home Builders",
         ],
         "Health & Medical": [
-            "Dentists", "Doctors", "Chiropractors",
-            "Physical Therapy", "Veterinarians"
+            "Dentists",
+            "Doctors",
+            "Chiropractors",
+            "Physical Therapy",
+            "Veterinarians",
         ],
         "Pets": [
-            "Pet Groomers", "Pet Boarding", "Pet Stores"
+            "Pet Groomers",
+            "Pet Boarding",
+            "Pet Stores",
         ],
         "Education & Childcare": [
-            "Daycares", "Private Schools", "Tutoring Centers", "Learning Centers"
+            "Daycares",
+            "Private Schools",
+            "Tutoring Centers",
+            "Learning Centers",
         ],
         "Professional Services": [
-            "Law Firms", "Accountants", "Consulting Firms"
+            "Law Firms",
+            "Accountants",
+            "Consulting Firms",
         ],
         "Community & Nonprofits": [
-            "Churches", "Nonprofits", "Community Centers"
+            "Churches",
+            "Nonprofits",
+            "Community Centers",
         ],
     }
 
-    html = BASE_STYLE + """
+    html = f"""{BASE_STYLE}
 <div class='navbar'>
-  <a href='/'>Home</a> |
-  <a href='/previous'>Previous Runs</a> |
-  <a href='/about'>About</a> |
-  <a href='/help'>Help</a>
+ <a href='/'>Home</a> |
+ <a href='/previous'>Previous Runs</a> |
+ <a href='/about'>About</a> |
+ <a href='/help'>Help</a>
 </div>
 <h1>Business Lead Scraper</h1>
 <h2>Select categories and enter ZIP & radius</h2>
 <form action='/run' method='get'>
   <div class='grid'>
 """
-    # groups and checkboxes
-    for g, cats in grouped.items():
-        html += f"<div class='group'><h3 onclick=\"toggleGroup('{g}')\">{g}</h3>"
+
+    for group_name, cats in grouped.items():
+        html += f"<div class='group'><h3 onclick=\"toggleGroup('{group_name}')\">{group_name}</h3>"
         for c in cats:
-            html += (
-                f"<label><input type='checkbox' name='categories' "
-                f"value='{c}'> {c}</label><br>"
-            )
+            html += f"<label><input type='checkbox' name='categories' value='{c}'> {c}</label><br>"
         html += "</div>"
+
     html += """
-  </div>
-  <br>
-  ZIP Code:
-  <input type='text' name='zipcode' required>
-  Radius (mi):
-  <input type='text' name='radius' required value='10'>
-  <br><br>
+  </div><br>
+  ZIP Code: <input type='text' name='zipcode' required>
+  Radius (mi): <input type='text' name='radius' required value='10'><br><br>
   <button type='submit'>Start Search</button>
 </form>
 <script>
 function toggleGroup(name){
-  const groups=document.querySelectorAll('.group');
-  groups.forEach(div=>{
-    const h=div.querySelector('h3');
-    if(h && h.textContent.trim()===name){
-      const boxes=div.querySelectorAll('input[type="checkbox"]');
-      const allChecked=[...boxes].every(b=>b.checked);
-      boxes.forEach(b=>b.checked=!allChecked);
+  const groups = document.querySelectorAll('.group');
+  groups.forEach(div => {
+    const h = div.querySelector('h3');
+    if(h && h.textContent.trim() === name){
+      const boxes = div.querySelectorAll('input[type="checkbox"]');
+      const allChecked = [...boxes].every(b => b.checked);
+      boxes.forEach(b => b.checked = !allChecked);
     }
   });
 }
@@ -558,19 +661,16 @@ function toggleGroup(name){
 """
     return render_template_string(html)
 
+
 @app.route("/run")
 def run_scraper():
     cats = request.args.getlist("categories")
     zipc = request.args.get("zipcode", "23220")
     rad = request.args.get("radius", "10")
 
-    if not cats:
-        cats = ["Restaurants"]  # fallback so it does something
-
     import threading
-    t = threading.Thread(target=run_scraper_process, args=(cats, zipc, rad))
-    t.daemon = True
-    t.start()
+
+    threading.Thread(target=run_scraper_process, args=(cats, zipc, rad)).start()
 
     html = """
 <style>
@@ -581,8 +681,8 @@ body{
   text-align:center;
   padding:20px;
 }
-h1{color:#00bfff}
-h2{color:#0099ff}
+h1{color:#00bfff;}
+h2{color:#0099ff;}
 #log-box{
   width:80%;
   margin:20px auto;
@@ -594,7 +694,14 @@ h2{color:#0099ff}
   border-radius:10px;
   padding:20px;
 }
-.navbar a{color:#00bfff;margin:0 10px;text-decoration:none}
+.navbar a{
+  color:#00bfff;
+  margin:0 10px;
+  text-decoration:none;
+}
+@media(max-width:768px){
+  #log-box{width:95%;}
+}
 </style>
 <div class='navbar'>
   <a href='/'>Back</a> |
@@ -607,82 +714,73 @@ h2{color:#0099ff}
 <div id='log-box'></div>
 <script>
 async function fetchLogs(){
-  try{
-    const r = await fetch('/logs');
-    const d = await r.json();
-    const box = document.getElementById('log-box');
-    box.innerHTML = d.logs.map(l => '<div>'+l+'</div>').join('');
-    box.scrollTop = box.scrollHeight;
-  }catch(e){
-    // ignore errors silently
-  }
+  const r = await fetch('/logs');
+  const d = await r.json();
+  const box = document.getElementById('log-box');
+  box.innerHTML = d.logs.map(l => '<div>' + l + '</div>').join('');
+  box.scrollTop = box.scrollHeight;
 }
 setInterval(fetchLogs, 2000);
 </script>
 """
     return render_template_string(html)
 
+
+@app.route("/previous")
+def previous():
+    files = os.listdir("runs") if os.path.exists("runs") else []
+    links = "".join(f"<li><a href='/runs/{f}'>{f}</a></li>" for f in files)
+    return render_template_string(
+        f"""{BASE_STYLE}
+<div class='navbar'><a href='/'>Home</a></div>
+<h1>Previous Runs</h1>
+<ul>{links}</ul>
+"""
+    )
+
+
+@app.route("/about")
+def about():
+    return render_template_string(
+        f"""{BASE_STYLE}
+<div class='navbar'><a href='/'>Home</a></div>
+<h1>About</h1>
+<p>Business Lead Scraper uses Google Places to find local businesses, extracts emails and phone numbers from their websites, and uploads them into Brevo:
+<br>List 3 = contacts with email
+<br>List 5 = contacts with no email but usable phone</p>
+"""
+    )
+
+
+@app.route("/help")
+def help_page():
+    return render_template_string(
+        f"""{BASE_STYLE}
+<div class='navbar'><a href='/'>Home</a></div>
+<h1>Help</h1>
+<p>
+1. Select one or more categories.<br>
+2. Enter the ZIP code and radius in miles.<br>
+3. Click "Start Search".<br>
+4. Watch the logs as businesses are discovered and uploaded to Brevo.<br>
+Timeout is 3 minutes; if at least 30 contacts are uploaded, it will stop early when the timer hits.
+</p>
+"""
+    )
+
+
 @app.route("/logs")
 def logs():
     return jsonify({"logs": scraper_logs})
 
-@app.route("/previous")
-def previous():
-    if not os.path.exists("runs"):
-        files = []
-    else:
-        files = sorted(os.listdir("runs"))
-    links = "".join(
-        f"<li><a href='/runs/{f}'>{f}</a></li>" for f in files
-    )
-    html = (
-        BASE_STYLE
-        + "<div class='navbar'>"
-        "<a href='/'>Home</a> | "
-        "<a href='/about'>About</a> | "
-        "<a href='/help'>Help</a>"
-        "</div>"
-        "<h1>Previous Runs</h1>"
-        f"<ul>{links}</ul>"
-    )
-    return render_template_string(html)
 
+# static file serving for /runs/*.xlsx if you want to hook that up later
 @app.route("/runs/<path:filename>")
 def download_run(filename):
+    from flask import send_from_directory
+
     return send_from_directory("runs", filename, as_attachment=True)
 
-@app.route("/about")
-def about():
-    html = (
-        BASE_STYLE
-        + "<div class='navbar'>"
-        "<a href='/'>Home</a> | "
-        "<a href='/previous'>Previous Runs</a> | "
-        "<a href='/help'>Help</a>"
-        "</div>"
-        "<h1>About</h1>"
-        "<p>Business Lead Scraper (Bertha v1) searches local businesses via Google Places, "
-        "scrapes websites for emails and phone numbers, and uploads contacts into Brevo.</p>"
-    )
-    return render_template_string(html)
-
-@app.route("/help")
-def help_page():
-    html = (
-        BASE_STYLE
-        + "<div class='navbar'>"
-        "<a href='/'>Home</a> | "
-        "<a href='/previous'>Previous Runs</a> | "
-        "<a href='/about'>About</a>"
-        "</div>"
-        "<h1>Help</h1>"
-        "<p>1 Select one or more business categories.<br>"
-        "2 Enter a ZIP code and search radius.<br>"
-        "3 Click Start Search.<br>"
-        "4 Watch logs on the run page to see which contacts were found and sent to Brevo.<br>"
-        "Contacts with emails go to list 3. Contacts with no email but a phone/website go to list 5.</p>"
-    )
-    return render_template_string(html)
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
